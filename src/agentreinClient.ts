@@ -1,9 +1,9 @@
 import axios from 'axios';
-import { AgentameUnavailableError } from './errors';
+import { AgentreinUnavailableError } from './errors';
 
 // ─── Types ───────────────────────────────────────────────
 
-export interface AgentameOptions {
+export interface AgentreinOptions {
     apiKey: string;
     serverUrl?: string;
     failureMode?: 'open' | 'closed';
@@ -32,18 +32,18 @@ export interface Session {
 }
 
 // Re-export errors for consumer convenience
-export { AgentameUnavailableError };
+export { AgentreinUnavailableError };
 
-// ─── Agentame Client ─────────────────────────────────────
+// ─── Agentrein Client ─────────────────────────────────────
 
-export class Agentame {
+export class Agentrein {
     private readonly serverUrl: string;
     private readonly apiKey: string;
     private readonly failureMode: 'open' | 'closed';
     private token: string | null = null;
 
-    constructor(options: AgentameOptions) {
-        this.serverUrl = options.serverUrl || 'https://agentame.up.railway.app';
+    constructor(options: AgentreinOptions) {
+        this.serverUrl = options.serverUrl || 'https://api.agentrein.com';
         this.apiKey = options.apiKey;
         this.failureMode = options.failureMode ?? 'open';
     }
@@ -51,7 +51,7 @@ export class Agentame {
     // ── Authentication ──────────────────────────────────
 
     /**
-     * Obtain a JWT token from the Agentame server using the API key.
+     * Obtain a JWT token from the Agentrein server using the API key.
      * Caches the token for subsequent requests.
      */
     private async getToken(): Promise<string> {
@@ -64,8 +64,8 @@ export class Agentame {
             this.token = res.data.data.token;
             return this.token!;
         } catch (err) {
-            throw new AgentameUnavailableError(
-                `Failed to authenticate with Agentame server: ${err instanceof Error ? err.message : String(err)}`,
+            throw new AgentreinUnavailableError(
+                `Failed to authenticate with Agentrein server: ${err instanceof Error ? err.message : String(err)}`,
             );
         }
     }
@@ -81,7 +81,7 @@ export class Agentame {
     // ── newSession ───────────────────────────────────────
 
     /**
-     * Create a new agent session on the Agentame server.
+     * Create a new agent session on the Agentrein server.
      *
      * @param options - Session options (agentId + optional intent).
      *                  Can also pass a plain string for backward compat (agentId).
@@ -108,14 +108,14 @@ export class Agentame {
     // ── call ─────────────────────────────────────────────
 
     /**
-     * Execute an API call under Agentame's protection.
+     * Execute an API call under Agentrein's protection.
      *
      * 1. Calls fn(...args)
-     * 2. Logs the action to the Agentame server (async, non-blocking)
+     * 2. Logs the action to the Agentrein server (async, non-blocking)
      * 3. On failure, triggers server-side rollback
      *
      * @param fn      - The function to execute
-     * @param session - The active Agentame session
+     * @param session - The active Agentrein session
      * @param args    - Arguments forwarded to fn
      */
     async call<T>(

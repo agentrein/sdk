@@ -1,8 +1,8 @@
 {
-  "name": "agentame",
+  "name": "agentrein",
   "version": "1.0.7",
-  "main": "dist/agentameClient.js",
-  "types": "dist/agentameClient.d.ts",
+  "main": "dist/agentreinClient.js",
+  "types": "dist/agentreinClient.d.ts",
   "files": [
     "dist/",
     "README.md"
