@@ -1,11 +1,11 @@
 /**
- * Custom errors for the Agentrein SDK.
+ * Custom errors for the AgentRein SDK.
  */
 
-export class AgentreinUnavailableError extends Error {
+export class AgentReinUnavailableError extends Error {
     constructor(message?: string) {
-        super(message ?? 'Agentrein safety layer is unavailable');
-        this.name = 'AgentreinUnavailableError';
+        super(message ?? 'AgentRein safety layer is unavailable');
+        this.name = 'AgentReinUnavailableError';
     }
 }
 

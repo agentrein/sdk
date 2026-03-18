@@ -1,9 +1,9 @@
 import axios from 'axios';
-import { AgentreinUnavailableError } from './errors';
+import { AgentReinUnavailableError } from './errors';
 
 // ─── Types ───────────────────────────────────────────────
 
-export interface AgentreinOptions {
+export interface AgentReinOptions {
     apiKey: string;
     serverUrl?: string;
     failureMode?: 'open' | 'closed';
@@ -32,17 +32,17 @@ export interface Session {
 }
 
 // Re-export errors for consumer convenience
-export { AgentreinUnavailableError };
+export { AgentReinUnavailableError };
 
-// ─── Agentrein Client ─────────────────────────────────────
+// ─── AgentRein Client ─────────────────────────────────────
 
-export class Agentrein {
+export class AgentRein {
     private readonly serverUrl: string;
     private readonly apiKey: string;
     private readonly failureMode: 'open' | 'closed';
     private token: string | null = null;
 
-    constructor(options: AgentreinOptions) {
+    constructor(options: AgentReinOptions) {
         this.serverUrl = options.serverUrl || 'https://api.agentrein.com';
         this.apiKey = options.apiKey;
         this.failureMode = options.failureMode ?? 'open';
@@ -51,7 +51,7 @@ export class Agentrein {
     // ── Authentication ──────────────────────────────────
 
     /**
-     * Obtain a JWT token from the Agentrein server using the API key.
+     * Obtain a JWT token from the AgentRein server using the API key.
      * Caches the token for subsequent requests.
      */
     private async getToken(): Promise<string> {
@@ -64,8 +64,8 @@ export class Agentrein {
             this.token = res.data.data.token;
             return this.token!;
         } catch (err) {
-            throw new AgentreinUnavailableError(
-                `Failed to authenticate with Agentrein server: ${err instanceof Error ? err.message : String(err)}`,
+            throw new AgentReinUnavailableError(
+                `Failed to authenticate with AgentRein server: ${err instanceof Error ? err.message : String(err)}`,
             );
         }
     }
@@ -81,7 +81,7 @@ export class Agentrein {
     // ── newSession ───────────────────────────────────────
 
     /**
-     * Create a new agent session on the Agentrein server.
+     * Create a new agent session on the AgentRein server.
      *
      * @param options - Session options (agentId + optional intent).
      *                  Can also pass a plain string for backward compat (agentId).
@@ -108,14 +108,14 @@ export class Agentrein {
     // ── call ─────────────────────────────────────────────
 
     /**
-     * Execute an API call under Agentrein's protection.
+     * Execute an API call under AgentRein's protection.
      *
      * 1. Calls fn(...args)
-     * 2. Logs the action to the Agentrein server (async, non-blocking)
+     * 2. Logs the action to the AgentRein server (async, non-blocking)
      * 3. On failure, triggers server-side rollback
      *
      * @param fn      - The function to execute
-     * @param session - The active Agentrein session
+     * @param session - The active AgentRein session
      * @param args    - Arguments forwarded to fn
      */
     async call<T>(
