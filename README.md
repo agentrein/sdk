@@ -1,4 +1,4 @@
-# Agentrein SDK — Node.js Client
+# Agentrein SDK - Node.js Client
 
 **Agentrein** is an AI Agent Reliability Platform that provides automatic rollback, approval gates, and intent verification for AI workflows. This SDK allows you to easily integrate Agentrein into your Node.js applications.
 
