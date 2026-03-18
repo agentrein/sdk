@@ -56,14 +56,14 @@ A `Session` groups multiple actions together. If any action in the session fails
 By providing an `intent` when creating a session, Agentrein uses an LLM to verify that each subsequent action aligns with the user's original goal. If "drift" is detected, the action can be flagged or blocked.
 
 ### Approval Gates
-You can configure rules in the [Agentrein Dashboard](https://api.agentrein.com) to require human approval for high-risk actions before they are executed.
+You can configure rules in the [Agentrein Dashboard](https://agentrein.com/sessions) to require human approval for high-risk actions before they are executed.
 
 ## 🛠️ Configuration
 
 | Option | Type | Description |
 | :--- | :--- | :--- |
 | `apiKey` | `string` | **Required**. Your organization's API key. |
-| `baseUrl` | `string` | Optional. Defaults to `https://agentame.up.railway.app`. |
+| `baseUrl` | `string` | Optional. Defaults to `https://api.agentrein.com`. |
 | `intentVerification` | `boolean` | Optional. Enable/disable LLM drift detection. |
 
 ## 📄 License
