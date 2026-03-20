@@ -1,14 +1,24 @@
 {
   "name": "agentrein",
-  "version": "1.0.8",
-  "main": "dist/agentreinClient.js",
-  "types": "dist/agentreinClient.d.ts",
+  "version": "1.0.9",
+  "main": "./dist/cjs/agentreinClient.js",
+  "module": "./dist/esm/agentreinClient.js",
+  "types": "./dist/cjs/agentreinClient.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/esm/agentreinClient.js",
+      "require": "./dist/cjs/agentreinClient.js",
+      "types": "./dist/cjs/agentreinClient.d.ts"
+    }
+  },
   "files": [
     "dist/",
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "npm run build:cjs && npm run build:esm",
+    "build:cjs": "tsc --project tsconfig.cjs.json",
+    "build:esm": "tsc --project tsconfig.esm.json",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

@@ -176,3 +176,5 @@ export class AgentRein {
         }
     }
 }
+
+export default AgentRein;
