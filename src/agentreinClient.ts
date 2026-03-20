@@ -15,10 +15,17 @@ export interface SessionOptions {
 }
 
 export interface UndoConfig {
-    type: 'slack-correction' | 'http-delete' | 'none';
+    __isUndoConfig: true;
+    type?: 'slack-correction' | 'http-delete' | 'none' | string;
     url?: string;
     headers?: Record<string, string>;
     body?: Record<string, unknown>;
+    action?: string;
+    rollback?: (response: any) => Promise<void>;
+}
+
+export function createUndoConfig(config: Omit<UndoConfig, '__isUndoConfig'>): UndoConfig {
+    return { __isUndoConfig: true, ...config };
 }
 
 export interface Session {
@@ -137,8 +144,7 @@ export class AgentRein {
             args.length > 0 &&
             args[0] &&
             typeof args[0] === 'object' &&
-            'type' in args[0] &&
-            ['slack-correction', 'http-delete', 'none'].includes(args[0].type)
+            '__isUndoConfig' in args[0]
         ) {
             undoConfig = args[0] as UndoConfig;
             callArgs = args.slice(1);
