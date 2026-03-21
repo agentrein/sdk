@@ -48,6 +48,7 @@ export class AgentRein {
     private readonly apiKey: string;
     private readonly failureMode: 'open' | 'closed';
     private token: string | null = null;
+    private currentSession: Session | null = null;
 
     constructor(options: AgentReinOptions) {
         this.serverUrl = options.serverUrl || 'https://api.agentrein.com';
@@ -113,10 +114,34 @@ export class AgentRein {
     }
 
     /**
+     * Start a new workflow session.
+     * All subsequent agentrein.call() will be logged under this session automatically.
+     */
+    async startWorkflow(options?: SessionOptions | string): Promise<Session> {
+        this.currentSession = await this.newSession(options);
+        return this.currentSession;
+    }
+
+    /**
+     * End the current workflow and clear the internal session state.
+     */
+    async endWorkflow(): Promise<void> {
+        this.currentSession = null;
+    }
+
+    /**
+     * Get the current active session, or create one automatically if none exists.
+     */
+    async getCurrentSession(): Promise<Session> {
+        if (!this.currentSession) {
+            this.currentSession = await this.newSession();
+        }
+        return this.currentSession;
+    }
+
+    /**
      * Resume an existing session by ID.
-     * Use this when multiple tools or steps need to share the same session.
-     *
-     * @param sessionId - The ID of the existing session to resume
+     * Use this when you need to explicitly attach to a known session.
      */
     async resumeSession(sessionId: string): Promise<Session> {
         const headers = await this.authHeaders();
@@ -124,7 +149,8 @@ export class AgentRein {
             `${this.serverUrl}/sessions/${sessionId}`,
             { headers },
         );
-        return res.data.data;
+        this.currentSession = res.data.data;
+        return this.currentSession!;
     }
 
     // ── call ─────────────────────────────────────────────
@@ -137,21 +163,19 @@ export class AgentRein {
      * 3. On failure, triggers server-side rollback
      *
      * @param fn      - The function to execute
-     * @param session - The active AgentRein session
      * @param args    - Arguments forwarded to fn
      */
     async call<T>(
         fn: Function,
-        session: Session,
         ...args: any[]
     ): Promise<T>;
     async call<T>(
         fn: Function,
-        session: Session,
         undoConfig: UndoConfig,
         ...args: any[]
     ): Promise<T>;
-    async call<T>(fn: Function, session: Session, ...args: any[]): Promise<T> {
+    async call<T>(fn: Function, ...args: any[]): Promise<T> {
+        const session = await this.getCurrentSession();
         // Detect if first extra arg is an UndoConfig object
         let undoConfig: UndoConfig | undefined;
         let callArgs = args;
