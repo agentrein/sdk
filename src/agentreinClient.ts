@@ -112,6 +112,27 @@ export class AgentRein {
         return res.data.data;
     }
 
+    // ── resumeSession & getSession ────────────────────────
+
+    /**
+     * Resume an existing session by ID.
+     */
+    async resumeSession(sessionId: string): Promise<Session> {
+        const headers = await this.authHeaders();
+        const res = await axios.get(
+            `${this.serverUrl}/sessions/${sessionId}`,
+            { headers },
+        );
+        return res.data.data;
+    }
+
+    /**
+     * Get a session by ID — alias for resumeSession.
+     */
+    async getSession(sessionId: string): Promise<Session> {
+        return this.resumeSession(sessionId);
+    }
+
     // ── call ─────────────────────────────────────────────
 
     /**
