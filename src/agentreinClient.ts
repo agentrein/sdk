@@ -48,7 +48,7 @@ export class AgentRein {
     private readonly apiKey: string;
     private readonly failureMode: 'open' | 'closed';
     private token: string | null = null;
-    private currentSession: Session | null = null;
+    private static activeSessions: Map<string, Session> = new Map();
 
     constructor(options: AgentReinOptions) {
         this.serverUrl = options.serverUrl || 'https://api.agentrein.com';
@@ -118,25 +118,27 @@ export class AgentRein {
      * All subsequent agentrein.call() will be logged under this session automatically.
      */
     async startWorkflow(options?: SessionOptions | string): Promise<Session> {
-        this.currentSession = await this.newSession(options);
-        return this.currentSession;
+        const session = await this.newSession(options);
+        AgentRein.activeSessions.set(this.apiKey, session);
+        return session;
     }
 
     /**
      * End the current workflow and clear the internal session state.
      */
     async endWorkflow(): Promise<void> {
-        this.currentSession = null;
+        AgentRein.activeSessions.delete(this.apiKey);
     }
 
     /**
      * Get the current active session, or create one automatically if none exists.
      */
     async getCurrentSession(): Promise<Session> {
-        if (!this.currentSession) {
-            this.currentSession = await this.newSession();
-        }
-        return this.currentSession;
+        const cached = AgentRein.activeSessions.get(this.apiKey);
+        if (cached) return cached;
+        const session = await this.newSession();
+        AgentRein.activeSessions.set(this.apiKey, session);
+        return session;
     }
 
     /**
@@ -149,8 +151,9 @@ export class AgentRein {
             `${this.serverUrl}/sessions/${sessionId}`,
             { headers },
         );
-        this.currentSession = res.data.data;
-        return this.currentSession!;
+        const session = res.data.data;
+        AgentRein.activeSessions.set(this.apiKey, session);
+        return session;
     }
 
     // ── call ─────────────────────────────────────────────
