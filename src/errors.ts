@@ -10,10 +10,8 @@ export class AgentReinUnavailableError extends Error {
 }
 
 export class ApprovalRejectedError extends Error {
-    constructor(apiName: string, reason?: string) {
-        super(
-            `Action "${apiName}" was rejected by a human reviewer${reason ? `: ${reason}` : ''}`,
-        );
+    constructor(public reason: string) {
+        super(`Action rejected by reviewer: ${reason}`);
         this.name = 'ApprovalRejectedError';
     }
 }
