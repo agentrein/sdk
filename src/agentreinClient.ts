@@ -28,6 +28,10 @@ export function createUndoConfig(config: Omit<UndoConfig, '__isUndoConfig'>): Un
     return { __isUndoConfig: true, ...config };
 }
 
+export interface CallOptions {
+    actionName?: string;
+}
+
 export interface Session {
     id: string;
     organizationId: string;
@@ -171,6 +175,21 @@ export class AgentRein {
             callArgs = args.slice(1);
         }
 
+        let apiName: string;
+        if (
+            callArgs.length > 0 &&
+            callArgs[callArgs.length - 1] &&
+            typeof callArgs[callArgs.length - 1] === 'object' &&
+            'actionName' in callArgs[callArgs.length - 1] &&
+            Object.keys(callArgs[callArgs.length - 1]).length === 1
+        ) {
+            const options = callArgs[callArgs.length - 1] as CallOptions;
+            callArgs = callArgs.slice(0, -1);
+            apiName = options.actionName || fn.name || 'anonymous';
+        } else {
+            apiName = fn.name || 'anonymous';
+        }
+
         const headers = await this.authHeaders();
 
         try {
@@ -180,7 +199,7 @@ export class AgentRein {
             axios.post(
                 `${this.serverUrl}/sessions/${session.id}/actions`,
                 {
-                    apiName: fn.name || 'anonymous',
+                    apiName,
                     operationType: 'CREATE',
                     payload: callArgs[0] ?? {},
                     response: result,
