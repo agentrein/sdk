@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { AgentReinUnavailableError } from './errors';
+import { AgentReinUnavailableError, ApprovalRejectedError } from './errors';
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -30,6 +30,9 @@ export function createUndoConfig(config: Omit<UndoConfig, '__isUndoConfig'>): Un
 
 export interface CallOptions {
     actionName?: string;
+    requiresApproval?: boolean;
+    pollIntervalMs?: number;
+    timeoutMs?: number;
 }
 
 export interface Session {
@@ -43,7 +46,7 @@ export interface Session {
 }
 
 // Re-export errors for consumer convenience
-export { AgentReinUnavailableError };
+export { AgentReinUnavailableError, ApprovalRejectedError };
 
 // ─── AgentRein Client ─────────────────────────────────────
 
@@ -137,6 +140,47 @@ export class AgentRein {
         return this.resumeSession(sessionId);
     }
 
+    // ── pollApproval (private) ────────────────────────────
+
+    /**
+     * Poll the approval endpoint until approved, rejected, or timeout.
+     *
+     * @returns 'APPROVED' or { status: 'REJECTED', reason: string }
+     */
+    private async pollApproval(
+        approvalId: string,
+        pollIntervalMs: number,
+        timeoutMs: number,
+    ): Promise<'APPROVED' | { status: 'REJECTED'; reason: string }> {
+        const headers = await this.authHeaders();
+        const deadline = Date.now() + timeoutMs;
+
+        while (Date.now() < deadline) {
+            try {
+                const res = await axios.get(
+                    `${this.serverUrl}/approvals/${approvalId}`,
+                    { headers },
+                );
+
+                const approval = res.data.data ?? res.data;
+
+                if (approval.status === 'APPROVED') {
+                    return 'APPROVED';
+                }
+
+                if (approval.status === 'REJECTED') {
+                    return { status: 'REJECTED', reason: approval.reason ?? 'Rejected by reviewer' };
+                }
+            } catch {
+                // Backend unreachable — continue polling (fail-open)
+            }
+
+            await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+        }
+
+        throw new Error('Approval timeout exceeded');
+    }
+
     // ── call ─────────────────────────────────────────────
 
     /**
@@ -145,6 +189,12 @@ export class AgentRein {
      * 1. Calls fn(...args)
      * 2. Logs the action to the AgentRein server (async, non-blocking)
      * 3. On failure, triggers server-side rollback
+     *
+     * When options.requiresApproval is true:
+     * 1. Logs the action with status PENDING_APPROVAL before executing
+     * 2. Polls until a human approves or rejects
+     * 3. If approved → executes fn, logs success
+     * 4. If rejected → throws ApprovalRejectedError → triggers rollback
      *
      * @param fn      - The function to execute
      * @param session - The active AgentRein session
@@ -175,15 +225,17 @@ export class AgentRein {
             callArgs = args.slice(1);
         }
 
+        // Detect CallOptions as last arg
         let apiName: string;
+        let options: CallOptions | undefined;
         if (
             callArgs.length > 0 &&
             callArgs[callArgs.length - 1] &&
             typeof callArgs[callArgs.length - 1] === 'object' &&
-            'actionName' in callArgs[callArgs.length - 1] &&
-            Object.keys(callArgs[callArgs.length - 1]).length === 1
+            ('actionName' in callArgs[callArgs.length - 1] ||
+             'requiresApproval' in callArgs[callArgs.length - 1])
         ) {
-            const options = callArgs[callArgs.length - 1] as CallOptions;
+            options = callArgs[callArgs.length - 1] as CallOptions;
             callArgs = callArgs.slice(0, -1);
             apiName = options.actionName || fn.name || 'anonymous';
         } else {
@@ -192,6 +244,61 @@ export class AgentRein {
 
         const headers = await this.authHeaders();
 
+        // ── Approval gate path ──────────────────────────
+        if (options?.requiresApproval) {
+            const pollIntervalMs = options.pollIntervalMs ?? 2000;
+            const timeoutMs = options.timeoutMs ?? 300_000; // 5 minutes
+
+            try {
+                // 1. Log action with PENDING_APPROVAL status
+                const actionRes = await axios.post(
+                    `${this.serverUrl}/sessions/${session.id}/actions`,
+                    {
+                        apiName,
+                        operationType: 'CREATE',
+                        payload: callArgs[0] ?? {},
+                        response: {},
+                        status: 'PENDING_APPROVAL',
+                        undoConfig,
+                    },
+                    { headers },
+                );
+
+                const action = actionRes.data.data ?? actionRes.data;
+                const actionId: string = action.id;
+                const approvalId: string = action.approvalRequest?.id ?? action.approval?.id ?? action.id;
+
+                // 2. Poll for approval decision
+                const decision = await this.pollApproval(approvalId, pollIntervalMs, timeoutMs);
+
+                if (decision !== 'APPROVED') {
+                    throw new ApprovalRejectedError(decision.reason);
+                }
+
+                // 3. Approved — execute the function
+                const result = await fn(...callArgs);
+
+                // 4. Update existing action to SUCCESS (fire-and-forget)
+                axios.patch(
+                    `${this.serverUrl}/sessions/${session.id}/actions/${actionId}`,
+                    { status: 'SUCCESS', response: result },
+                    { headers },
+                ).catch(() => { });
+
+                return result;
+            } catch (error) {
+                // Trigger server-side rollback
+                await axios.post(
+                    `${this.serverUrl}/sessions/${session.id}/rollback`,
+                    {},
+                    { headers },
+                ).catch(() => { });
+
+                throw error;
+            }
+        }
+
+        // ── Standard path (no approval) ─────────────────
         try {
             const result = await fn(...callArgs);
 
