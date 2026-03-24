@@ -140,6 +140,28 @@ export class AgentRein {
         return this.resumeSession(sessionId);
     }
 
+    /**
+     * Completes an active session.
+     */
+    async completeSession(session: Session): Promise<Session> {
+        const headers = await this.authHeaders();
+        try {
+            const res = await axios.patch(
+                `${this.serverUrl}/sessions/${session.id}`,
+                { status: 'COMPLETED' },
+                { headers },
+            );
+            return res.data.data;
+        } catch (err) {
+            if (this.failureMode === 'closed') {
+                throw new AgentReinUnavailableError(
+                    `Failed to complete session: ${err instanceof Error ? err.message : String(err)}`
+                );
+            }
+            return session;
+        }
+    }
+
     // ── pollApproval (private) ────────────────────────────
 
     /**
