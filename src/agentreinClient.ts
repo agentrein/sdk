@@ -255,7 +255,7 @@ export class AgentRein {
             callArgs[callArgs.length - 1] &&
             typeof callArgs[callArgs.length - 1] === 'object' &&
             ('actionName' in callArgs[callArgs.length - 1] ||
-             'requiresApproval' in callArgs[callArgs.length - 1])
+                'requiresApproval' in callArgs[callArgs.length - 1])
         ) {
             options = callArgs[callArgs.length - 1] as CallOptions;
             callArgs = callArgs.slice(0, -1);
@@ -269,7 +269,7 @@ export class AgentRein {
         // ── Approval gate path ──────────────────────────
         if (options?.requiresApproval) {
             const pollIntervalMs = options.pollIntervalMs ?? 2000;
-            const timeoutMs = options.timeoutMs ?? 300_000; // 5 minutes
+            const timeoutMs = options.timeoutMs ?? 86_400_000; // 5 minutes
 
             try {
                 // 1. Log action with PENDING_APPROVAL status
