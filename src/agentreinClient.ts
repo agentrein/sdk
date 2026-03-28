@@ -269,7 +269,7 @@ export class AgentRein {
         // ── Approval gate path ──────────────────────────
         if (options?.requiresApproval) {
             const pollIntervalMs = options.pollIntervalMs ?? 2000;
-            const timeoutMs = options.timeoutMs ?? 86_400_000; // 5 minutes
+            const timeoutMs = options.timeoutMs ?? 86_400_000; // 24 hours
 
             try {
                 // 1. Log action with PENDING_APPROVAL status
@@ -282,6 +282,7 @@ export class AgentRein {
                         response: {},
                         status: 'PENDING_APPROVAL',
                         undoConfig,
+                        timeoutMs,
                     },
                     { headers },
                 );
