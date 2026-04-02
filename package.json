@@ -6,9 +6,9 @@
   "types": "./dist/cjs/agentreinClient.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/cjs/agentreinClient.d.ts",
       "import": "./dist/esm/agentreinClient.js",
-      "require": "./dist/cjs/agentreinClient.js",
-      "types": "./dist/cjs/agentreinClient.d.ts"
+      "require": "./dist/cjs/agentreinClient.js"
     }
   },
   "files": [
@@ -18,7 +18,7 @@
   "scripts": {
     "build": "npm run build:cjs && npm run build:esm",
     "build:cjs": "tsc --project tsconfig.cjs.json",
-    "build:esm": "tsc --project tsconfig.esm.json",
+    "build:esm": "tsc --project tsconfig.esm.json && node -e \"require('fs').writeFileSync('dist/esm/package.json', JSON.stringify({type:'module'}))\"",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
