@@ -45,6 +45,24 @@ export interface Session {
     endedAt: string | null;
 }
 
+export interface ConnectorAction<TArgs = unknown, TResult = unknown> {
+    apiName: string;
+    operationType: 'CREATE' | 'UPDATE' | 'DELETE';
+    getState?: (args: TArgs) => Promise<unknown>;
+    execute: (args: TArgs) => Promise<TResult>;
+}
+
+function isConnectorAction(fn: unknown): fn is ConnectorAction {
+    return (
+        typeof fn === 'object' &&
+        fn !== null &&
+        'apiName' in fn &&
+        'operationType' in fn &&
+        'execute' in fn &&
+        typeof (fn as ConnectorAction).execute === 'function'
+    );
+}
+
 // Re-export errors for consumer convenience
 export { AgentReinUnavailableError, ApprovalRejectedError };
 
@@ -223,17 +241,17 @@ export class AgentRein {
      * @param args    - Arguments forwarded to fn
      */
     async call<T>(
-        fn: Function,
+        fn: Function | ConnectorAction,
         session: Session,
         ...args: any[]
     ): Promise<T>;
     async call<T>(
-        fn: Function,
+        fn: Function | ConnectorAction,
         session: Session,
         undoConfig: UndoConfig,
         ...args: any[]
     ): Promise<T>;
-    async call<T>(fn: Function, session: Session, ...args: any[]): Promise<T> {
+    async call<T>(fn: Function | ConnectorAction, session: Session, ...args: any[]): Promise<T> {
         // Detect if first extra arg is an UndoConfig object
         let undoConfig: UndoConfig | undefined;
         let callArgs = args;
@@ -247,21 +265,57 @@ export class AgentRein {
             callArgs = args.slice(1);
         }
 
-        // Detect CallOptions as last arg
+        let connectorAction: ConnectorAction | undefined;
+        if (isConnectorAction(fn)) {
+            connectorAction = fn as ConnectorAction;
+        }
+
         let apiName: string;
+        let operationType: 'CREATE' | 'UPDATE' | 'DELETE';
         let options: CallOptions | undefined;
-        if (
-            callArgs.length > 0 &&
-            callArgs[callArgs.length - 1] &&
-            typeof callArgs[callArgs.length - 1] === 'object' &&
-            ('actionName' in callArgs[callArgs.length - 1] ||
-                'requiresApproval' in callArgs[callArgs.length - 1])
-        ) {
-            options = callArgs[callArgs.length - 1] as CallOptions;
-            callArgs = callArgs.slice(0, -1);
-            apiName = options.actionName || fn.name || 'anonymous';
+
+        if (connectorAction) {
+            apiName = connectorAction.apiName;
+            operationType = connectorAction.operationType;
+            // Still detect CallOptions as last arg for requiresApproval / timeoutMs
+            if (
+                callArgs.length > 0 &&
+                callArgs[callArgs.length - 1] &&
+                typeof callArgs[callArgs.length - 1] === 'object' &&
+                ('actionName' in callArgs[callArgs.length - 1] ||
+                    'requiresApproval' in callArgs[callArgs.length - 1])
+            ) {
+                options = callArgs[callArgs.length - 1] as CallOptions;
+                callArgs = callArgs.slice(0, -1);
+            }
         } else {
-            apiName = fn.name || 'anonymous';
+            if (
+                callArgs.length > 0 &&
+                callArgs[callArgs.length - 1] &&
+                typeof callArgs[callArgs.length - 1] === 'object' &&
+                ('actionName' in callArgs[callArgs.length - 1] ||
+                    'requiresApproval' in callArgs[callArgs.length - 1])
+            ) {
+                options = callArgs[callArgs.length - 1] as CallOptions;
+                callArgs = callArgs.slice(0, -1);
+                apiName = options.actionName || (fn as Function).name || 'anonymous';
+            } else {
+                apiName = (fn as Function).name || 'anonymous';
+            }
+            operationType = 'CREATE';
+        }
+
+        let beforeState: unknown = undefined;
+        if (
+            connectorAction &&
+            connectorAction.getState &&
+            (operationType === 'UPDATE' || operationType === 'DELETE')
+        ) {
+            try {
+                beforeState = await connectorAction.getState(callArgs[0]);
+            } catch (err) {
+                console.warn(`[AgentRein] getState failed for ${apiName}:`, err);
+            }
         }
 
         const headers = await this.authHeaders();
@@ -277,12 +331,13 @@ export class AgentRein {
                     `${this.serverUrl}/sessions/${session.id}/actions`,
                     {
                         apiName,
-                        operationType: 'CREATE',
+                        operationType,
                         payload: callArgs[0] ?? {},
                         response: {},
                         status: 'PENDING_APPROVAL',
                         undoConfig,
                         timeoutMs,
+                        ...(beforeState !== undefined && beforeState !== null ? { beforeState } : {}),
                     },
                     { headers },
                 );
@@ -299,7 +354,9 @@ export class AgentRein {
                 }
 
                 // 3. Approved — execute the function
-                const result = await fn(...callArgs);
+                const result = connectorAction
+                    ? await connectorAction.execute(callArgs[0])
+                    : await (fn as Function)(...callArgs);
 
                 // 4. Update existing action to SUCCESS (fire-and-forget)
                 axios.patch(
@@ -323,18 +380,21 @@ export class AgentRein {
 
         // ── Standard path (no approval) ─────────────────
         try {
-            const result = await fn(...callArgs);
+            const result = connectorAction
+                ? await connectorAction.execute(callArgs[0])
+                : await (fn as Function)(...callArgs);
 
             // Log action to server (fire-and-forget)
             axios.post(
                 `${this.serverUrl}/sessions/${session.id}/actions`,
                 {
                     apiName,
-                    operationType: 'CREATE',
+                    operationType,
                     payload: callArgs[0] ?? {},
                     response: result,
                     status: 'SUCCESS',
                     undoConfig,
+                    ...(beforeState !== undefined && beforeState !== null ? { beforeState } : {}),
                 },
                 { headers },
             ).catch(() => { });
