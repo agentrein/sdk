@@ -135,7 +135,7 @@ await agentrein.call(
 | `actionName` | `string` | `fn.name` | Override the logged action name |
 | `requiresApproval` | `boolean` | `false` | Block until a human approves from the dashboard |
 | `pollIntervalMs` | `number` | `2000` | Approval polling interval in ms |
-| `timeoutMs` | `number` | `300000` | Approval timeout in ms (5 min) |
+| `timeoutMs` | `number` | `86400000` | Approval timeout in ms (24h) |
 
 ---
 
@@ -147,6 +147,20 @@ Both are aliases — returns the full session with all actions.
 const session = await agentrein.resumeSession('sess_abc123')
 // or
 const session = await agentrein.getSession('sess_abc123')
+```
+
+---
+
+### `agentrein.completeSession(sessionOrId)`
+
+Marks the session as `COMPLETED`. This locks the session and prevents further actions from being added.
+
+```typescript
+// With a Session object
+await agentrein.completeSession(session)
+
+// With a session ID string
+await agentrein.completeSession('sess_abc123')
 ```
 
 ## Approval Gate
@@ -182,7 +196,6 @@ try {
 |---|---|
 | `AgentReinUnavailableError` | Server unreachable during `newSession()` or token fetch. In fail-closed mode, also thrown from `call()`. |
 | `ApprovalRejectedError` | Reviewer rejected the action. Has a `.reason` property. |
-| `ApprovalTimeoutError` | Approval not received within `timeoutMs`. |
 
 ## Fail Modes
 
