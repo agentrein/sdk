@@ -151,16 +151,12 @@ const session = await agentrein.getSession('sess_abc123')
 
 ---
 
-### `agentrein.completeSession(sessionOrId)`
+### `agentrein.completeSession(session: Session): Promise<Session>`
 
 Marks the session as `COMPLETED`. This locks the session and prevents further actions from being added.
 
 ```typescript
-// With a Session object
 await agentrein.completeSession(session)
-
-// With a session ID string
-await agentrein.completeSession('sess_abc123')
 ```
 
 ## Approval Gate
