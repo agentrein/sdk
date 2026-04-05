@@ -1,9 +1,0 @@
-export { stripe } from './stripe';
-export { slack } from './slack';
-export { github } from './github';
-export { hubspot } from './hubspot';
-export { salesforce } from './salesforce';
-export { notion } from './notion';
-export { gmail } from './gmail';
-export { gdrive } from './gdrive';
-export { gsheets } from './gsheets';

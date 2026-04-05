@@ -1,19 +1,14 @@
 {
   "name": "agentrein",
   "version": "1.0.31",
-  "main": "./dist/cjs/index.js",
-  "module": "./dist/esm/index.js",
-  "types": "./dist/cjs/index.d.ts",
+  "main": "./dist/cjs/agentreinClient.js",
+  "module": "./dist/esm/agentreinClient.js",
+  "types": "./dist/cjs/agentreinClient.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/cjs/index.d.ts",
-      "import": "./dist/esm/index.js",
-      "require": "./dist/cjs/index.js"
-    },
-    "./connectors": {
-      "types": "./dist/cjs/connectors/index.d.ts",
-      "import": "./dist/esm/connectors/index.js",
-      "require": "./dist/cjs/connectors/index.js"
+      "types": "./dist/cjs/agentreinClient.d.ts",
+      "import": "./dist/esm/agentreinClient.js",
+      "require": "./dist/cjs/agentreinClient.js"
     }
   },
   "files": [
@@ -27,11 +22,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "axios": "^1.6.0",
-    "stripe": "^14.0.0",
-    "@slack/web-api": "^7.0.0",
-    "@octokit/rest": "^20.0.0",
-    "googleapis": "^140.0.0"
+    "axios": "^1.6.0"
   },
   "devDependencies": {
     "typescript": "^5.0.0",
