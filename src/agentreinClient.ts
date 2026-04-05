@@ -35,6 +35,10 @@ export interface CallOptions {
     timeoutMs?: number;
 }
 
+export interface WrapOptions {
+    connector: string;
+}
+
 export interface Session {
     id: string;
     organizationId: string;
@@ -65,6 +69,64 @@ function isConnectorAction(fn: unknown): fn is ConnectorAction {
 
 // Re-export errors for consumer convenience
 export { AgentReinUnavailableError, ApprovalRejectedError };
+
+// ─── Proxy Helper ─────────────────────────────────────────
+
+function createProxy<T extends object>(
+    target: T,
+    session: Session,
+    connector: string,
+    path: string[],
+    agentrein: AgentRein,
+): T {
+    return new Proxy(target, {
+        get(obj, prop) {
+            // Ignore Promise methods and Symbols to avoid breaking await detection
+            if (prop === 'then' || prop === 'catch' || prop === 'finally' || typeof prop === 'symbol') {
+                return (obj as any)[prop];
+            }
+
+            const value = (obj as any)[prop];
+
+            if (typeof value === 'function') {
+                return async (...args: any[]) => {
+                    const apiName = `${connector}.${[...path, String(prop)].join('.')}`;
+                    try {
+                        // Execute with correct `this` binding
+                        const result = await value.apply(obj, args);
+
+                        // Log action fire-and-forget
+                        agentrein.logAction(
+                            session,
+                            apiName,
+                            args[0] ?? {},
+                            result,
+                        ).catch(() => {});
+
+                        return result;
+                    } catch (error) {
+                        // Trigger backend rollback then re-throw
+                        agentrein.triggerRollback(session).catch(() => {});
+                        throw error;
+                    }
+                };
+            }
+
+            if (typeof value === 'object' && value !== null) {
+                // Recurse deeper for nested objects
+                return createProxy(
+                    value,
+                    session,
+                    connector,
+                    [...path, String(prop)],
+                    agentrein,
+                );
+            }
+
+            return value;
+        },
+    });
+}
 
 // ─── AgentRein Client ─────────────────────────────────────
 
@@ -410,6 +472,84 @@ export class AgentRein {
 
             throw error;
         }
+    }
+
+    // ── wrap ─────────────────────────────────────────────────
+
+    /**
+     * Wrap a third-party client with AgentRein protection.
+     * Every method call on the returned proxy is automatically
+     * intercepted, logged, and rolled back on failure.
+     *
+     * @example
+     * const agentOctokit = agentrein.wrap(octokit, session, { connector: 'github' });
+     * await agentOctokit.issues.create({ owner, repo, title });
+     */
+    wrap<T extends object>(client: T, session: Session, options: WrapOptions): T {
+        return createProxy(client, session, options.connector, [], this);
+    }
+
+    // ── logAction (internal, used by wrap proxy) ─────────────
+
+    /**
+     * Log a successfully executed action to the backend.
+     * Called internally by the wrap() proxy — not intended for direct use.
+     */
+    async logAction(
+        session: Session,
+        apiName: string,
+        payload: Record<string, unknown>,
+        response: unknown,
+    ): Promise<void> {
+        try {
+            const headers = await this.authHeaders();
+            await axios.post(
+                `${this.serverUrl}/sessions/${session.id}/actions`,
+                {
+                    apiName,
+                    operationType: this.inferOperationType(apiName),
+                    payload,
+                    response,
+                    status: 'SUCCESS',
+                },
+                { headers },
+            );
+        } catch {
+            // fail-open: logging failure must never crash the agent
+        }
+    }
+
+    // ── triggerRollback (internal, used by wrap proxy) ───────
+
+    /**
+     * Trigger server-side rollback for a session.
+     * Called internally by the wrap() proxy on execution failure.
+     */
+    async triggerRollback(session: Session): Promise<void> {
+        try {
+            const headers = await this.authHeaders();
+            await axios.post(
+                `${this.serverUrl}/sessions/${session.id}/rollback`,
+                {},
+                { headers },
+            );
+        } catch {
+            // fail-open
+        }
+    }
+
+    // ── inferOperationType (internal) ────────────────────────
+
+    /**
+     * Infer operationType from the last segment of apiName.
+     * create → CREATE, update/patch → UPDATE, delete/del/remove → DELETE
+     * Everything else defaults to CREATE.
+     */
+    private inferOperationType(apiName: string): 'CREATE' | 'UPDATE' | 'DELETE' {
+        const last = apiName.split('.').pop()?.toLowerCase() ?? '';
+        if (['update', 'patch', 'modify', 'edit'].includes(last)) return 'UPDATE';
+        if (['delete', 'del', 'remove', 'trash'].includes(last)) return 'DELETE';
+        return 'CREATE';
     }
 }
 
