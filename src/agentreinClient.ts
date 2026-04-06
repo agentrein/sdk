@@ -29,7 +29,9 @@ export function createUndoConfig(config: Omit<UndoConfig, '__isUndoConfig'>): Un
 }
 
 export interface CallOptions {
-    actionName?: string;
+    actionName: string;
+    operationType?: 'CREATE' | 'UPDATE' | 'DELETE';
+    rollback?: (result: any) => Promise<void>;
     requiresApproval?: boolean;
     pollIntervalMs?: number;
     timeoutMs?: number;
@@ -49,84 +51,8 @@ export interface Session {
     endedAt: string | null;
 }
 
-export interface ConnectorAction<TArgs = unknown, TResult = unknown> {
-    apiName: string;
-    operationType: 'CREATE' | 'UPDATE' | 'DELETE';
-    getState?: (args: TArgs) => Promise<unknown>;
-    execute: (args: TArgs) => Promise<TResult>;
-}
-
-function isConnectorAction(fn: unknown): fn is ConnectorAction {
-    return (
-        typeof fn === 'object' &&
-        fn !== null &&
-        'apiName' in fn &&
-        'operationType' in fn &&
-        'execute' in fn &&
-        typeof (fn as ConnectorAction).execute === 'function'
-    );
-}
-
 // Re-export errors for consumer convenience
 export { AgentReinUnavailableError, ApprovalRejectedError };
-
-// ─── Proxy Helper ─────────────────────────────────────────
-
-function createProxy<T extends object>(
-    target: T,
-    session: Session,
-    connector: string,
-    path: string[],
-    agentrein: AgentRein,
-): T {
-    return new Proxy(target, {
-        get(obj, prop) {
-            // Ignore Promise methods and Symbols to avoid breaking await detection
-            if (prop === 'then' || prop === 'catch' || prop === 'finally' || typeof prop === 'symbol') {
-                return (obj as any)[prop];
-            }
-
-            const value = (obj as any)[prop];
-
-            if (typeof value === 'function') {
-                return async (...args: any[]) => {
-                    const apiName = `${connector}.${[...path, String(prop)].join('.')}`;
-                    try {
-                        // Execute with correct `this` binding
-                        const result = await value.apply(obj, args);
-
-                        // Log action fire-and-forget
-                        agentrein.logAction(
-                            session,
-                            apiName,
-                            args[0] ?? {},
-                            result,
-                        ).catch(() => {});
-
-                        return result;
-                    } catch (error) {
-                        // Trigger backend rollback then re-throw
-                        agentrein.triggerRollback(session).catch(() => {});
-                        throw error;
-                    }
-                };
-            }
-
-            if (typeof value === 'object' && value !== null) {
-                // Recurse deeper for nested objects
-                return createProxy(
-                    value,
-                    session,
-                    connector,
-                    [...path, String(prop)],
-                    agentrein,
-                );
-            }
-
-            return value;
-        },
-    });
-}
 
 // ─── AgentRein Client ─────────────────────────────────────
 
@@ -135,6 +61,7 @@ export class AgentRein {
     private readonly apiKey: string;
     private readonly failureMode: 'open' | 'closed';
     private token: string | null = null;
+    private tokenExpiresAt: number = 0;
 
     constructor(options: AgentReinOptions) {
         this.serverUrl = options.serverUrl || 'https://api.agentrein.com';
@@ -144,29 +71,25 @@ export class AgentRein {
 
     // ── Authentication ──────────────────────────────────
 
-    /**
-     * Obtain a JWT token from the AgentRein server using the API key.
-     * Caches the token for subsequent requests.
-     */
     private async getToken(): Promise<string> {
-        if (this.token) return this.token;
-
+        const BUFFER_MS = 5 * 60 * 1000; // refresh 5 min before expiry
+        if (this.token && Date.now() < this.tokenExpiresAt - BUFFER_MS) {
+            return this.token;
+        }
         try {
             const res = await axios.post(`${this.serverUrl}/auth/token`, {
                 apiKey: this.apiKey,
             });
             this.token = res.data.data.token;
+            this.tokenExpiresAt = Date.now() + 24 * 60 * 60 * 1000; // 24h matches backend JWT expiry
             return this.token!;
         } catch (err) {
             throw new AgentReinUnavailableError(
-                `Failed to authenticate with AgentRein server: ${err instanceof Error ? err.message : String(err)}`,
+                `Failed to authenticate: ${err instanceof Error ? err.message : String(err)}`
             );
         }
     }
 
-    /**
-     * Build authorization headers for server requests.
-     */
     private async authHeaders(): Promise<Record<string, string>> {
         const token = await this.getToken();
         return { Authorization: `Bearer ${token}` };
@@ -174,13 +97,6 @@ export class AgentRein {
 
     // ── newSession ───────────────────────────────────────
 
-    /**
-     * Create a new agent session on the AgentRein server.
-     *
-     * @param options - Session options (agentId + optional intent).
-     *                  Can also pass a plain string for backward compat (agentId).
-     *                  If omitted, a random agentId is generated.
-     */
     async newSession(options?: SessionOptions | string): Promise<Session> {
         const resolved = typeof options === 'string'
             ? { agentId: options, intent: undefined }
@@ -201,9 +117,6 @@ export class AgentRein {
 
     // ── resumeSession & getSession ────────────────────────
 
-    /**
-     * Resume an existing session by ID.
-     */
     async resumeSession(sessionId: string): Promise<Session> {
         const headers = await this.authHeaders();
         const res = await axios.get(
@@ -213,23 +126,18 @@ export class AgentRein {
         return res.data.data;
     }
 
-    /**
-     * Get a session by ID — alias for resumeSession.
-     */
     async getSession(sessionId: string): Promise<Session> {
         return this.resumeSession(sessionId);
     }
 
-    /**
-     * Completes an active session.
-     */
-    async completeSession(session: Session): Promise<Session> {
+    async completeSession(session: Session | string): Promise<Session> {
+        const sessionId = typeof session === 'string' ? session : session.id;
         const headers = await this.authHeaders();
         try {
             const res = await axios.patch(
-                `${this.serverUrl}/sessions/${session.id}`,
+                `${this.serverUrl}/sessions/${sessionId}`,
                 { status: 'COMPLETED' },
-                { headers },
+                { headers }
             );
             return res.data.data;
         } catch (err) {
@@ -238,17 +146,12 @@ export class AgentRein {
                     `Failed to complete session: ${err instanceof Error ? err.message : String(err)}`
                 );
             }
-            return session;
+            return typeof session === 'string' ? { id: session } as Session : session;
         }
     }
 
     // ── pollApproval (private) ────────────────────────────
 
-    /**
-     * Poll the approval endpoint until approved, rejected, or timeout.
-     *
-     * @returns 'APPROVED' or { status: 'REJECTED', reason: string }
-     */
     private async pollApproval(
         approvalId: string,
         pollIntervalMs: number,
@@ -285,107 +188,20 @@ export class AgentRein {
 
     // ── call ─────────────────────────────────────────────
 
-    /**
-     * Execute an API call under AgentRein's protection.
-     *
-     * 1. Calls fn(...args)
-     * 2. Logs the action to the AgentRein server (async, non-blocking)
-     * 3. On failure, triggers server-side rollback
-     *
-     * When options.requiresApproval is true:
-     * 1. Logs the action with status PENDING_APPROVAL before executing
-     * 2. Polls until a human approves or rejects
-     * 3. If approved → executes fn, logs success
-     * 4. If rejected → throws ApprovalRejectedError → triggers rollback
-     *
-     * @param fn      - The function to execute
-     * @param session - The active AgentRein session
-     * @param args    - Arguments forwarded to fn
-     */
     async call<T>(
-        fn: Function | ConnectorAction,
+        fn: (...args: any[]) => Promise<T>,
         session: Session,
-        ...args: any[]
-    ): Promise<T>;
-    async call<T>(
-        fn: Function | ConnectorAction,
-        session: Session,
-        undoConfig: UndoConfig,
-        ...args: any[]
-    ): Promise<T>;
-    async call<T>(fn: Function | ConnectorAction, session: Session, ...args: any[]): Promise<T> {
-        // Detect if first extra arg is an UndoConfig object
-        let undoConfig: UndoConfig | undefined;
-        let callArgs = args;
-        if (
-            args.length > 0 &&
-            args[0] &&
-            typeof args[0] === 'object' &&
-            '__isUndoConfig' in args[0]
-        ) {
-            undoConfig = args[0] as UndoConfig;
-            callArgs = args.slice(1);
-        }
-
-        let connectorAction: ConnectorAction | undefined;
-        if (isConnectorAction(fn)) {
-            connectorAction = fn as ConnectorAction;
-        }
-
-        let apiName: string;
-        let operationType: 'CREATE' | 'UPDATE' | 'DELETE';
-        let options: CallOptions | undefined;
-
-        if (connectorAction) {
-            apiName = connectorAction.apiName;
-            operationType = connectorAction.operationType;
-            // Still detect CallOptions as last arg for requiresApproval / timeoutMs
-            if (
-                callArgs.length > 0 &&
-                callArgs[callArgs.length - 1] &&
-                typeof callArgs[callArgs.length - 1] === 'object' &&
-                ('actionName' in callArgs[callArgs.length - 1] ||
-                    'requiresApproval' in callArgs[callArgs.length - 1])
-            ) {
-                options = callArgs[callArgs.length - 1] as CallOptions;
-                callArgs = callArgs.slice(0, -1);
-            }
-        } else {
-            if (
-                callArgs.length > 0 &&
-                callArgs[callArgs.length - 1] &&
-                typeof callArgs[callArgs.length - 1] === 'object' &&
-                ('actionName' in callArgs[callArgs.length - 1] ||
-                    'requiresApproval' in callArgs[callArgs.length - 1])
-            ) {
-                options = callArgs[callArgs.length - 1] as CallOptions;
-                callArgs = callArgs.slice(0, -1);
-                apiName = options.actionName || (fn as Function).name || 'anonymous';
-            } else {
-                apiName = (fn as Function).name || 'anonymous';
-            }
-            operationType = 'CREATE';
-        }
-
-        let beforeState: unknown = undefined;
-        if (
-            connectorAction &&
-            connectorAction.getState &&
-            (operationType === 'UPDATE' || operationType === 'DELETE')
-        ) {
-            try {
-                beforeState = await connectorAction.getState(callArgs[0]);
-            } catch (err) {
-                console.warn(`[AgentRein] getState failed for ${apiName}:`, err);
-            }
-        }
-
-        const headers = await this.authHeaders();
+        options: CallOptions & { args?: any[] }
+    ): Promise<T> {
+        let result: T;
+        const apiName = options.actionName;
+        const operationType = options.operationType ?? 'CREATE';
 
         // ── Approval gate path ──────────────────────────
-        if (options?.requiresApproval) {
+        if (options.requiresApproval) {
             const pollIntervalMs = options.pollIntervalMs ?? 2000;
             const timeoutMs = options.timeoutMs ?? 86_400_000; // 24 hours
+            const headers = await this.authHeaders();
 
             try {
                 // 1. Log action with PENDING_APPROVAL status
@@ -394,12 +210,10 @@ export class AgentRein {
                     {
                         apiName,
                         operationType,
-                        payload: callArgs[0] ?? {},
+                        payload: options.args?.[0] ?? {},
                         response: {},
                         status: 'PENDING_APPROVAL',
-                        undoConfig,
                         timeoutMs,
-                        ...(beforeState !== undefined && beforeState !== null ? { beforeState } : {}),
                     },
                     { headers },
                 );
@@ -416,9 +230,7 @@ export class AgentRein {
                 }
 
                 // 3. Approved — execute the function
-                const result = connectorAction
-                    ? await connectorAction.execute(callArgs[0])
-                    : await (fn as Function)(...callArgs);
+                result = await fn(...(options.args ?? []));
 
                 // 4. Update existing action to SUCCESS (fire-and-forget)
                 axios.patch(
@@ -429,12 +241,29 @@ export class AgentRein {
 
                 return result;
             } catch (error) {
-                // Trigger server-side rollback
-                await axios.post(
-                    `${this.serverUrl}/sessions/${session.id}/rollback`,
-                    {},
-                    { headers },
-                ).catch(() => { });
+                if (options.rollback) {
+                    try {
+                        await options.rollback(result!);
+                    } catch (e) {}
+
+                    axios.post(
+                        `${this.serverUrl}/sessions/${session.id}/actions`,
+                        {
+                            apiName,
+                            operationType,
+                            payload: options.args?.[0] ?? {},
+                            response: error instanceof Error ? error.message : String(error),
+                            status: 'FAILED',
+                        },
+                        { headers }
+                    ).catch(() => {});
+                } else {
+                    axios.post(
+                        `${this.serverUrl}/sessions/${session.id}/rollback`,
+                        {},
+                        { headers },
+                    ).catch(() => { });
+                }
 
                 throw error;
             }
@@ -442,33 +271,53 @@ export class AgentRein {
 
         // ── Standard path (no approval) ─────────────────
         try {
-            const result = connectorAction
-                ? await connectorAction.execute(callArgs[0])
-                : await (fn as Function)(...callArgs);
+            result = await fn(...(options.args ?? []));
 
             // Log action to server (fire-and-forget)
-            axios.post(
-                `${this.serverUrl}/sessions/${session.id}/actions`,
-                {
-                    apiName,
-                    operationType,
-                    payload: callArgs[0] ?? {},
-                    response: result,
-                    status: 'SUCCESS',
-                    undoConfig,
-                    ...(beforeState !== undefined && beforeState !== null ? { beforeState } : {}),
-                },
-                { headers },
+            this.authHeaders().then((headers) => 
+                axios.post(
+                    `${this.serverUrl}/sessions/${session.id}/actions`,
+                    {
+                        apiName,
+                        operationType,
+                        payload: options.args?.[0] ?? {},
+                        response: result,
+                        status: 'SUCCESS',
+                    },
+                    { headers },
+                )
             ).catch(() => { });
 
             return result;
         } catch (error) {
-            // Trigger server-side rollback
-            await axios.post(
-                `${this.serverUrl}/sessions/${session.id}/rollback`,
-                {},
-                { headers },
-            ).catch(() => { });
+            if (options.rollback) {
+                try {
+                    await options.rollback(result!);
+                } catch (e) {}
+
+                this.authHeaders().then((headers) =>
+                    axios.post(
+                        `${this.serverUrl}/sessions/${session.id}/actions`,
+                        {
+                            apiName,
+                            operationType,
+                            payload: options.args?.[0] ?? {},
+                            response: error instanceof Error ? error.message : String(error),
+                            status: 'FAILED',
+                        },
+                        { headers }
+                    )
+                ).catch(() => {});
+            } else {
+                // Trigger server LIFO rollback
+                this.authHeaders().then((headers) => 
+                    axios.post(
+                        `${this.serverUrl}/sessions/${session.id}/rollback`,
+                        {},
+                        { headers },
+                    )
+                ).catch(() => { });
+            }
 
             throw error;
         }
@@ -476,80 +325,74 @@ export class AgentRein {
 
     // ── wrap ─────────────────────────────────────────────────
 
-    /**
-     * Wrap a third-party client with AgentRein protection.
-     * Every method call on the returned proxy is automatically
-     * intercepted, logged, and rolled back on failure.
-     *
-     * @example
-     * const agentOctokit = agentrein.wrap(octokit, session, { connector: 'github' });
-     * await agentOctokit.issues.create({ owner, repo, title });
-     */
-    wrap<T extends object>(client: T, session: Session, options: WrapOptions): T {
-        return createProxy(client, session, options.connector, [], this);
-    }
+    wrap<T extends object>(client: T, session: Session, options: { connector: string }): T {
+        const self = this; // capture AgentRein instance
 
-    // ── logAction (internal, used by wrap proxy) ─────────────
+        function makeProxy<V>(target: V, path: string[]): V {
+            if (typeof target !== 'function' && (typeof target !== 'object' || target === null)) {
+                return target; // primitive — pass through
+            }
 
-    /**
-     * Log a successfully executed action to the backend.
-     * Called internally by the wrap() proxy — not intended for direct use.
-     */
-    async logAction(
-        session: Session,
-        apiName: string,
-        payload: Record<string, unknown>,
-        response: unknown,
-    ): Promise<void> {
-        try {
-            const headers = await this.authHeaders();
-            await axios.post(
-                `${this.serverUrl}/sessions/${session.id}/actions`,
-                {
-                    apiName,
-                    operationType: this.inferOperationType(apiName),
-                    payload,
-                    response,
-                    status: 'SUCCESS',
+            return new Proxy(target as object, {
+                get(innerTarget: any, prop: string | symbol) {
+                    if (typeof prop !== 'string') return innerTarget[prop];
+                    const next = innerTarget[prop];
+                    return makeProxy(next, [...path, prop]);
                 },
-                { headers },
-            );
-        } catch {
-            // fail-open: logging failure must never crash the agent
+
+                apply(innerTarget: any, thisArg: any, args: any[]) {
+                    const apiName = `${options.connector}.${path.join('.')}`;
+                    const lastSeg = path[path.length - 1]?.toLowerCase() ?? '';
+                    const OP_MAP: Record<string, 'CREATE' | 'UPDATE' | 'DELETE'> = {
+                        create: 'CREATE', send: 'CREATE', post: 'CREATE',
+                        append: 'CREATE', add: 'CREATE',
+                        update: 'UPDATE', patch: 'UPDATE', modify: 'UPDATE',
+                        move: 'UPDATE', trash: 'UPDATE', upsert: 'UPDATE',
+                        delete: 'DELETE', del: 'DELETE', remove: 'DELETE', destroy: 'DELETE',
+                    };
+                    const operationType = OP_MAP[lastSeg] ?? 'CREATE';
+
+                    const execution = innerTarget.apply(thisArg, args);
+
+                    // Handle both sync and async functions
+                    if (execution && typeof execution.then === 'function') {
+                        return execution.then((result: any) => {
+                            self.authHeaders().then(headers =>
+                                axios.post(
+                                    `${self.serverUrl}/sessions/${session.id}/actions`,
+                                    { apiName, operationType, payload: args[0] ?? {}, response: result, status: 'SUCCESS' },
+                                    { headers }
+                                )
+                            ).catch(() => {});
+                            return result;
+                        }).catch((err: any) => {
+                            self.authHeaders().then(headers =>
+                                axios.post(`${self.serverUrl}/sessions/${session.id}/rollback`, {}, { headers })
+                            ).catch(() => {});
+                            throw err;
+                        });
+                    }
+
+                    // Sync function — log fire-and-forget
+                    self.authHeaders().then(headers =>
+                        axios.post(
+                            `${self.serverUrl}/sessions/${session.id}/actions`,
+                            { apiName, operationType, payload: args[0] ?? {}, response: execution, status: 'SUCCESS' },
+                            { headers }
+                        )
+                    ).catch(() => {});
+                    return execution;
+                },
+            }) as V;
         }
-    }
 
-    // ── triggerRollback (internal, used by wrap proxy) ───────
-
-    /**
-     * Trigger server-side rollback for a session.
-     * Called internally by the wrap() proxy on execution failure.
-     */
-    async triggerRollback(session: Session): Promise<void> {
-        try {
-            const headers = await this.authHeaders();
-            await axios.post(
-                `${this.serverUrl}/sessions/${session.id}/rollback`,
-                {},
-                { headers },
-            );
-        } catch {
-            // fail-open
-        }
-    }
-
-    // ── inferOperationType (internal) ────────────────────────
-
-    /**
-     * Infer operationType from the last segment of apiName.
-     * create → CREATE, update/patch → UPDATE, delete/del/remove → DELETE
-     * Everything else defaults to CREATE.
-     */
-    private inferOperationType(apiName: string): 'CREATE' | 'UPDATE' | 'DELETE' {
-        const last = apiName.split('.').pop()?.toLowerCase() ?? '';
-        if (['update', 'patch', 'modify', 'edit'].includes(last)) return 'UPDATE';
-        if (['delete', 'del', 'remove', 'trash'].includes(last)) return 'DELETE';
-        return 'CREATE';
+        // Root proxy: each top-level property access starts a fresh path
+        return new Proxy(client as object, {
+            get(target: any, prop: string | symbol) {
+                if (typeof prop !== 'string') return target[prop];
+                return makeProxy(target[prop], [prop]);
+            },
+        }) as T;
     }
 }
 
