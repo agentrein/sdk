@@ -35,7 +35,11 @@ const session = await agentrein.newSession({
 await agentrein.call(
   stripe.invoices.create,
   session,
-  { customer: 'cus_123', amount: 5000 }
+  {
+    actionName: 'stripe.invoices.create',
+    operationType: 'CREATE',
+    args: [{ customer: 'cus_123', amount: 5000 }]
+  }
 )
 // If stripe.invoices.create throws, AgentRein automatically triggers
 // a server-side LIFO rollback of all actions in this session.
@@ -95,47 +99,51 @@ const session = await agentrein.newSession()
 
 ---
 
-### `agentrein.call(fn, session, ...args, options?)`
+### `agentrein.call(fn, session, options)`
 
 Execute a function under AgentRein's protection. The call is logged, and on failure the entire session is rolled back.
 
 ```typescript
-// Basic usage
+// Basic usage — custom API with manual rollback
 await agentrein.call(
-  stripe.invoices.create,
+  myApi.createRecord,
   session,
-  { customer: 'cus_123', amount: 5000 }
-)
-
-// With custom action name
-await agentrein.call(
-  stripe.invoices.create,
-  session,
-  { customer: 'cus_123', amount: 5000 },
-  { actionName: 'stripe.invoices.create' }
-)
+  {
+    actionName: 'myApi.records.create',
+    operationType: 'CREATE',
+    args: [{ name: 'Ahmed', plan: 'pro' }],
+    rollback: async (record) => {
+      await myApi.deleteRecord(record.id);
+    },
+  }
+);
 
 // With approval gate
 await agentrein.call(
-  stripe.invoices.create,
+  myApi.chargeCustomer,
   session,
-  { customer: 'cus_123', amount: 500000 },
   {
+    actionName: 'myApi.payments.charge',
+    operationType: 'CREATE',
+    args: [{ amount: 50000, currency: 'usd' }],
     requiresApproval: true,
     pollIntervalMs: 2000,
     timeoutMs: 300000,
   }
-)
+);
 ```
 
 #### `CallOptions`
 
-| Option | Type | Default | Description |
+| Option | Type | Required | Description |
 |---|---|---|---|
-| `actionName` | `string` | `fn.name` | Override the logged action name |
-| `requiresApproval` | `boolean` | `false` | Block until a human approves from the dashboard |
-| `pollIntervalMs` | `number` | `2000` | Approval polling interval in ms |
-| `timeoutMs` | `number` | `86400000` | Approval timeout in ms (24h) |
+| `actionName` | `string` | Yes | Logged action name e.g. `'stripe.invoices.create'` |
+| `operationType` | `'CREATE' \| 'UPDATE' \| 'DELETE'` | No | Defaults to `'CREATE'` |
+| `args` | `any[]` | No | Arguments passed to `fn` |
+| `rollback` | `(result: T) => Promise<void>` | No | Custom rollback — if omitted, server LIFO rollback triggers |
+| `requiresApproval` | `boolean` | No | Block until human approves from dashboard |
+| `pollIntervalMs` | `number` | No | Approval polling interval (default: 2000ms) |
+| `timeoutMs` | `number` | No | Approval timeout (default: 24h) |
 
 ---
 
