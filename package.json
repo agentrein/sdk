@@ -1,6 +1,6 @@
 {
   "name": "agentrein",
-  "version": "1.0.32",
+  "version": "1.0.33",
   "main": "./dist/cjs/agentreinClient.js",
   "module": "./dist/esm/agentreinClient.js",
   "types": "./dist/cjs/agentreinClient.d.ts",
