@@ -150,25 +150,6 @@ export class AgentRein {
         }
     }
 
-    async rollbackSession(session: Session | string): Promise<void> {
-        const sessionId = typeof session === 'string' ? session : session.id;
-        try {
-            const headers = await this.authHeaders();
-            await axios.post(
-                `${this.serverUrl}/sessions/${sessionId}/rollback`,
-                {},
-                { headers }
-            );
-        } catch (err) {
-            if (this.failureMode === 'closed') {
-                throw new AgentReinUnavailableError(
-                    `Failed to rollback session: ${err instanceof Error ? err.message : String(err)}`
-                );
-            }
-            // fail-open: swallow silently
-        }
-    }
-
     // ── pollApproval (private) ────────────────────────────
 
     private async pollApproval(
@@ -276,11 +257,26 @@ export class AgentRein {
                         },
                         { headers }
                     ).catch(() => {});
-                    throw error;
                 } else {
-                    await this.rollbackSession(session);
-                    throw error;
+                    axios.post(
+                        `${this.serverUrl}/sessions/${session.id}/actions`,
+                        {
+                            apiName: options.actionName,
+                            operationType: options.operationType ?? 'CREATE',
+                            payload: options.args?.[0] ?? {},
+                            response: error instanceof Error ? error.message : String(error),
+                            status: 'FAILED',
+                        },
+                        { headers }
+                    ).catch(() => {
+                        // Fallback: log failed, fire rollback directly
+                        this.authHeaders().then(h =>
+                            axios.post(`${this.serverUrl}/sessions/${session.id}/rollback`, {}, { headers: h })
+                        ).catch(() => {});
+                    });
                 }
+
+                throw error;
             }
         }
 
@@ -323,11 +319,28 @@ export class AgentRein {
                         { headers }
                     )
                 ).catch(() => {});
-                throw error;
             } else {
-                await this.rollbackSession(session);
-                throw error;
+                this.authHeaders().then((headers) =>
+                    axios.post(
+                        `${this.serverUrl}/sessions/${session.id}/actions`,
+                        {
+                            apiName: options.actionName,
+                            operationType: options.operationType ?? 'CREATE',
+                            payload: options.args?.[0] ?? {},
+                            response: error instanceof Error ? error.message : String(error),
+                            status: 'FAILED',
+                        },
+                        { headers }
+                    )
+                ).catch(() => {
+                    // Fallback: log failed, fire rollback directly
+                    this.authHeaders().then(h =>
+                        axios.post(`${this.serverUrl}/sessions/${session.id}/rollback`, {}, { headers: h })
+                    ).catch(() => {});
+                });
             }
+
+            throw error;
         }
     }
 
