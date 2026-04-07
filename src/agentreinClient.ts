@@ -28,17 +28,11 @@ export function createUndoConfig(config: Omit<UndoConfig, '__isUndoConfig'>): Un
     return { __isUndoConfig: true, ...config };
 }
 
-export interface CallOptions {
-    actionName: string;
-    operationType?: 'CREATE' | 'UPDATE' | 'DELETE';
-    rollback?: (result: any) => Promise<void>;
-    requiresApproval?: boolean;
-    pollIntervalMs?: number;
-    timeoutMs?: number;
-}
-
 export interface WrapOptions {
     connector: string;
+    requiresApproval?: string[];
+    pollIntervalMs?: number;
+    timeoutMs?: number;
 }
 
 export interface Session {
@@ -72,7 +66,7 @@ export class AgentRein {
     // ── Authentication ──────────────────────────────────
 
     private async getToken(): Promise<string> {
-        const BUFFER_MS = 5 * 60 * 1000; // refresh 5 min before expiry
+        const BUFFER_MS = 5 * 60 * 1000;
         if (this.token && Date.now() < this.tokenExpiresAt - BUFFER_MS) {
             return this.token;
         }
@@ -81,7 +75,7 @@ export class AgentRein {
                 apiKey: this.apiKey,
             });
             this.token = res.data.data.token;
-            this.tokenExpiresAt = Date.now() + 24 * 60 * 60 * 1000; // 24h matches backend JWT expiry
+            this.tokenExpiresAt = Date.now() + 24 * 60 * 60 * 1000;
             return this.token!;
         } catch (err) {
             throw new AgentReinUnavailableError(
@@ -150,6 +144,45 @@ export class AgentRein {
         }
     }
 
+    // ── logAction (private) ──────────────────────────────
+
+    private logAction(
+        sessionId: string,
+        apiName: string,
+        operationType: 'CREATE' | 'UPDATE' | 'DELETE',
+        payload: unknown,
+        response: unknown,
+        status: 'SUCCESS' | 'FAILED' | 'PENDING_APPROVAL',
+        extra?: { timeoutMs?: number },
+    ): void {
+        // Always fire-and-forget, but with a guaranteed fallback
+        this.authHeaders().then(headers =>
+            axios.post(
+                `${this.serverUrl}/sessions/${sessionId}/actions`,
+                {
+                    apiName,
+                    operationType,
+                    payload: payload ?? {},
+                    response: response ?? {},
+                    status,
+                    ...(extra?.timeoutMs != null && { timeoutMs: extra.timeoutMs }),
+                },
+                { headers },
+            )
+        ).catch(() => {
+            // Fallback only for FAILED: fire rollback directly if logging fails
+            if (status === 'FAILED') {
+                this.authHeaders().then(h =>
+                    axios.post(
+                        `${this.serverUrl}/sessions/${sessionId}/rollback`,
+                        {},
+                        { headers: h },
+                    )
+                ).catch(() => {});
+            }
+        });
+    }
+
     // ── pollApproval (private) ────────────────────────────
 
     private async pollApproval(
@@ -166,265 +199,149 @@ export class AgentRein {
                     `${this.serverUrl}/approvals/${approvalId}`,
                     { headers },
                 );
-
                 const approval = res.data.data ?? res.data;
-
-                if (approval.status === 'APPROVED') {
-                    return 'APPROVED';
-                }
-
+                if (approval.status === 'APPROVED') return 'APPROVED';
                 if (approval.status === 'REJECTED') {
                     return { status: 'REJECTED', reason: approval.reason ?? 'Rejected by reviewer' };
                 }
             } catch {
-                // Backend unreachable — continue polling (fail-open)
+                // backend unreachable — continue polling
             }
-
             await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
         }
-
         throw new Error('Approval timeout exceeded');
-    }
-
-    // ── call ─────────────────────────────────────────────
-
-    async call<T>(
-        fn: (...args: any[]) => Promise<T>,
-        session: Session,
-        options: CallOptions & { args?: any[] }
-    ): Promise<T> {
-        let result: T;
-        const apiName = options.actionName;
-        const operationType = options.operationType ?? 'CREATE';
-
-        // ── Approval gate path ──────────────────────────
-        if (options.requiresApproval) {
-            const pollIntervalMs = options.pollIntervalMs ?? 2000;
-            const timeoutMs = options.timeoutMs ?? 86_400_000; // 24 hours
-            const headers = await this.authHeaders();
-
-            try {
-                // 1. Log action with PENDING_APPROVAL status
-                const actionRes = await axios.post(
-                    `${this.serverUrl}/sessions/${session.id}/actions`,
-                    {
-                        apiName,
-                        operationType,
-                        payload: options.args?.[0] ?? {},
-                        response: {},
-                        status: 'PENDING_APPROVAL',
-                        timeoutMs,
-                    },
-                    { headers },
-                );
-
-                const action = actionRes.data.data ?? actionRes.data;
-                const actionId: string = action.id;
-                const approvalId: string = action.approvalRequest?.id ?? action.approval?.id ?? action.id;
-
-                // 2. Poll for approval decision
-                const decision = await this.pollApproval(approvalId, pollIntervalMs, timeoutMs);
-
-                if (decision !== 'APPROVED') {
-                    throw new ApprovalRejectedError(decision.reason);
-                }
-
-                // 3. Approved — execute the function
-                result = await fn(...(options.args ?? []));
-
-                // 4. Update existing action to SUCCESS (fire-and-forget)
-                axios.patch(
-                    `${this.serverUrl}/sessions/${session.id}/actions/${actionId}`,
-                    { status: 'SUCCESS', response: result },
-                    { headers },
-                ).catch(() => { });
-
-                return result;
-            } catch (error) {
-                if (options.rollback) {
-                    try {
-                        await options.rollback(result!);
-                    } catch (e) {}
-
-                    axios.post(
-                        `${this.serverUrl}/sessions/${session.id}/actions`,
-                        {
-                            apiName,
-                            operationType,
-                            payload: options.args?.[0] ?? {},
-                            response: error instanceof Error ? error.message : String(error),
-                            status: 'FAILED',
-                        },
-                        { headers }
-                    ).catch(() => {});
-                } else {
-                    axios.post(
-                        `${this.serverUrl}/sessions/${session.id}/actions`,
-                        {
-                            apiName: options.actionName,
-                            operationType: options.operationType ?? 'CREATE',
-                            payload: options.args?.[0] ?? {},
-                            response: error instanceof Error ? error.message : String(error),
-                            status: 'FAILED',
-                        },
-                        { headers }
-                    ).catch(() => {
-                        // Fallback: log failed, fire rollback directly
-                        this.authHeaders().then(h =>
-                            axios.post(`${this.serverUrl}/sessions/${session.id}/rollback`, {}, { headers: h })
-                        ).catch(() => {});
-                    });
-                }
-
-                throw error;
-            }
-        }
-
-        // ── Standard path (no approval) ─────────────────
-        try {
-            result = await fn(...(options.args ?? []));
-
-            // Log action to server (fire-and-forget)
-            this.authHeaders().then((headers) => 
-                axios.post(
-                    `${this.serverUrl}/sessions/${session.id}/actions`,
-                    {
-                        apiName,
-                        operationType,
-                        payload: options.args?.[0] ?? {},
-                        response: result,
-                        status: 'SUCCESS',
-                    },
-                    { headers },
-                )
-            ).catch(() => { });
-
-            return result;
-        } catch (error) {
-            if (options.rollback) {
-                try {
-                    await options.rollback(result!);
-                } catch (e) {}
-
-                this.authHeaders().then((headers) =>
-                    axios.post(
-                        `${this.serverUrl}/sessions/${session.id}/actions`,
-                        {
-                            apiName,
-                            operationType,
-                            payload: options.args?.[0] ?? {},
-                            response: error instanceof Error ? error.message : String(error),
-                            status: 'FAILED',
-                        },
-                        { headers }
-                    )
-                ).catch(() => {});
-            } else {
-                this.authHeaders().then((headers) =>
-                    axios.post(
-                        `${this.serverUrl}/sessions/${session.id}/actions`,
-                        {
-                            apiName: options.actionName,
-                            operationType: options.operationType ?? 'CREATE',
-                            payload: options.args?.[0] ?? {},
-                            response: error instanceof Error ? error.message : String(error),
-                            status: 'FAILED',
-                        },
-                        { headers }
-                    )
-                ).catch(() => {
-                    // Fallback: log failed, fire rollback directly
-                    this.authHeaders().then(h =>
-                        axios.post(`${this.serverUrl}/sessions/${session.id}/rollback`, {}, { headers: h })
-                    ).catch(() => {});
-                });
-            }
-
-            throw error;
-        }
     }
 
     // ── wrap ─────────────────────────────────────────────────
 
-    wrap<T extends object>(client: T, session: Session, options: { connector: string }): T {
-        const self = this; // capture AgentRein instance
+    wrap<T extends object>(client: T, session: Session, options: WrapOptions): T {
+        const self = this;
+        const pollIntervalMs = options.pollIntervalMs ?? 2000;
+        const timeoutMs = options.timeoutMs ?? 86_400_000;
+
+        const OP_MAP: Record<string, 'CREATE' | 'UPDATE' | 'DELETE'> = {
+            create: 'CREATE', send: 'CREATE', post: 'CREATE',
+            append: 'CREATE', add: 'CREATE',
+            update: 'UPDATE', patch: 'UPDATE', modify: 'UPDATE',
+            move: 'UPDATE', trash: 'UPDATE', upsert: 'UPDATE',
+            delete: 'DELETE', del: 'DELETE', remove: 'DELETE', destroy: 'DELETE',
+        };
 
         function makeProxy<V>(target: V, path: string[]): V {
             if (typeof target !== 'function' && (typeof target !== 'object' || target === null)) {
-                return target; // primitive — pass through
+                return target;
             }
 
             return new Proxy(target as object, {
                 get(innerTarget: any, prop: string | symbol) {
                     if (typeof prop !== 'string') return innerTarget[prop];
-                    const next = innerTarget[prop];
-                    return makeProxy(next, [...path, prop]);
+                    return makeProxy(innerTarget[prop], [...path, prop]);
                 },
 
                 apply(innerTarget: any, thisArg: any, args: any[]) {
                     const apiName = `${options.connector}.${path.join('.')}`;
                     const lastSeg = path[path.length - 1]?.toLowerCase() ?? '';
-                    const OP_MAP: Record<string, 'CREATE' | 'UPDATE' | 'DELETE'> = {
-                        create: 'CREATE', send: 'CREATE', post: 'CREATE',
-                        append: 'CREATE', add: 'CREATE',
-                        update: 'UPDATE', patch: 'UPDATE', modify: 'UPDATE',
-                        move: 'UPDATE', trash: 'UPDATE', upsert: 'UPDATE',
-                        delete: 'DELETE', del: 'DELETE', remove: 'DELETE', destroy: 'DELETE',
-                    };
                     const operationType = OP_MAP[lastSeg] ?? 'CREATE';
+                    const methodPath = path.join('.');
 
-                    const execution = innerTarget.apply(thisArg, args);
+                    // ── Approval gate path ──────────────────────────────────
+                    const needsApproval = options.requiresApproval?.some(
+                        p => methodPath === p || apiName === p
+                    ) ?? false;
 
-                    // Handle both sync and async functions
-                    if (execution && typeof execution.then === 'function') {
-                        return execution.then((result: any) => {
-                            self.authHeaders().then(headers =>
-                                axios.post(
-                                    `${self.serverUrl}/sessions/${session.id}/actions`,
-                                    { apiName, operationType, payload: args[0] ?? {}, response: result, status: 'SUCCESS' },
-                                    { headers }
+                    if (needsApproval) {
+                        return (async () => {
+                            const headers = await self.authHeaders();
+
+                            // 1. Log as PENDING_APPROVAL — await this, not fire-and-forget
+                            const actionRes = await axios.post(
+                                `${self.serverUrl}/sessions/${session.id}/actions`,
+                                {
+                                    apiName,
+                                    operationType,
+                                    payload: args[0] ?? {},
+                                    response: {},
+                                    status: 'PENDING_APPROVAL',
+                                    timeoutMs,
+                                },
+                                { headers },
+                            );
+                            const action = actionRes.data.data ?? actionRes.data;
+                            const actionId: string = action.id;
+                            const approvalId: string = 
+                                action.approvalRequest?.id ?? 
+                                action.approval?.id ?? 
+                                action.id;
+
+                            // 2. Poll for decision
+                            let decision: 'APPROVED' | { status: 'REJECTED'; reason: string };
+                            try {
+                                decision = await self.pollApproval(approvalId, pollIntervalMs, timeoutMs);
+                            } catch (timeoutErr) {
+                                // Timeout — log FAILED (triggers server auto-rollback)
+                                self.logAction(session.id, apiName, operationType, args[0], null, 'FAILED');
+                                throw timeoutErr;
+                            }
+
+                            // 3. Rejected — log FAILED (triggers server auto-rollback)
+                            if (decision !== 'APPROVED') {
+                                self.logAction(session.id, apiName, operationType, args[0], null, 'FAILED');
+                                throw new ApprovalRejectedError(
+                                    (decision as { status: 'REJECTED'; reason: string }).reason
+                                );
+                            }
+
+                            // 4. Approved — execute the function
+                            let result: any;
+                            try {
+                                result = await innerTarget.apply(thisArg, args);
+                            } catch (execErr) {
+                                self.logAction(session.id, apiName, operationType, args[0], 
+                                    execErr instanceof Error ? execErr.message : String(execErr), 
+                                    'FAILED');
+                                throw execErr;
+                            }
+
+                            // 5. PATCH existing action to SUCCESS (fire-and-forget)
+                            self.authHeaders().then(h =>
+                                axios.patch(
+                                    `${self.serverUrl}/sessions/${session.id}/actions/${actionId}`,
+                                    { status: 'SUCCESS', response: result },
+                                    { headers: h },
                                 )
                             ).catch(() => {});
+
+                            return result;
+                        })();
+                    }
+
+                    // ── Standard execution path ─────────────────────────────
+                    const execution = innerTarget.apply(thisArg, args);
+
+                    if (execution && typeof execution.then === 'function') {
+                        return execution.then((result: any) => {
+                            // Log SUCCESS — fire-and-forget
+                            self.logAction(session.id, apiName, operationType, args[0], result, 'SUCCESS');
                             return result;
                         }).catch((err: any) => {
-                            // Log the failed action — this triggers the server-side auto-rollback
-                            // (server.ts setImmediate rollbackAll on FAILED status, from Prompt 13)
-                            self.authHeaders().then(headers =>
-                                axios.post(
-                                    `${self.serverUrl}/sessions/${session.id}/actions`,
-                                    {
-                                        apiName,
-                                        operationType,
-                                        payload: args[0] ?? {},
-                                        response: err instanceof Error ? err.message : String(err),
-                                        status: 'FAILED',
-                                    },
-                                    { headers }
-                                )
-                            ).catch(() => {
-                                // Fallback: if logging fails, fire rollback directly
-                                self.authHeaders().then(h =>
-                                    axios.post(`${self.serverUrl}/sessions/${session.id}/rollback`, {}, { headers: h })
-                                ).catch(() => {});
-                            });
+                            // Log FAILED — this is what triggers server-side auto-rollback
+                            // logAction() has a built-in fallback to POST /rollback if logging fails
+                            self.logAction(
+                                session.id, apiName, operationType, args[0],
+                                err instanceof Error ? err.message : String(err),
+                                'FAILED'
+                            );
                             throw err;
                         });
                     }
 
-                    // Sync function — log fire-and-forget
-                    self.authHeaders().then(headers =>
-                        axios.post(
-                            `${self.serverUrl}/sessions/${session.id}/actions`,
-                            { apiName, operationType, payload: args[0] ?? {}, response: execution, status: 'SUCCESS' },
-                            { headers }
-                        )
-                    ).catch(() => {});
+                    // Sync function
+                    self.logAction(session.id, apiName, operationType, args[0], execution, 'SUCCESS');
                     return execution;
                 },
             }) as V;
         }
 
-        // Root proxy: each top-level property access starts a fresh path
         return new Proxy(client as object, {
             get(target: any, prop: string | symbol) {
                 if (typeof prop !== 'string') return target[prop];

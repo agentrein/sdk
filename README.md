@@ -32,17 +32,11 @@ const session = await agentrein.newSession({
 })
 
 // Wrap any API call — AgentRein logs it and auto-rolls back on failure
-await agentrein.call(
-  stripe.invoices.create,
-  session,
-  {
-    actionName: 'stripe.invoices.create',
-    operationType: 'CREATE',
-    args: [{ customer: 'cus_123', amount: 5000 }]
-  }
-)
-// If stripe.invoices.create throws, AgentRein automatically triggers
-// a server-side LIFO rollback of all actions in this session.
+const agentStripe = agentrein.wrap(stripe, session, { connector: 'stripe' })
+
+await agentStripe.invoices.create({ customer: 'cus_123', amount: 5000 })
+// If anything fails → automatic LIFO rollback
+// Use requiresApproval for high-risk methods
 ```
 
 ## Core Concepts
@@ -50,7 +44,7 @@ await agentrein.call(
 | Concept | Description |
 |---|---|
 | **Sessions** | One agent workflow. All actions are grouped under a single session so rollback can undo them as a unit. |
-| **Actions** | Every `call()` is logged with the full payload and response, creating a complete audit trail. |
+| **Actions** | Every action intercepted by `wrap()` is logged with the full payload and response, creating a complete audit trail. |
 | **Rollback** | On any failure, AgentRein triggers a LIFO (last-in-first-out) undo of every action in the session. |
 | **Approval Gate** | Flag high-risk actions with `requiresApproval: true` to block execution until a human approves from the dashboard. |
 | **Fail-Open** | If the AgentRein server is unreachable, your agent continues normally by default — safety never blocks production. |
@@ -97,54 +91,25 @@ const session = await agentrein.newSession()
 
 **Returns:** `Session` object with `id`, `organizationId`, `agentId`, `intent`, `status`, `startedAt`, `endedAt`.
 
----
+### `agentrein.wrap(client, session, options)`
 
-### `agentrein.call(fn, session, options)`
-
-Execute a function under AgentRein's protection. The call is logged, and on failure the entire session is rolled back.
+Wrap a standard SDK client to enable automatic logging, interception, and rollbacks.
 
 ```typescript
-// Basic usage — custom API with manual rollback
-await agentrein.call(
-  myApi.createRecord,
-  session,
-  {
-    actionName: 'myApi.records.create',
-    operationType: 'CREATE',
-    args: [{ name: 'Ahmed', plan: 'pro' }],
-    rollback: async (record) => {
-      await myApi.deleteRecord(record.id);
-    },
-  }
-);
-
-// With approval gate
-await agentrein.call(
-  myApi.chargeCustomer,
-  session,
-  {
-    actionName: 'myApi.payments.charge',
-    operationType: 'CREATE',
-    args: [{ amount: 50000, currency: 'usd' }],
-    requiresApproval: true,
-    pollIntervalMs: 2000,
-    timeoutMs: 300000,
-  }
-);
+const agentStripe = agentrein.wrap(stripe, session, { 
+  connector: 'stripe',
+  requiresApproval: ['subscriptions.cancel', 'invoices.del']
+})
 ```
 
-#### `CallOptions`
+#### `WrapOptions`
 
 | Option | Type | Required | Description |
 |---|---|---|---|
-| `actionName` | `string` | Yes | Logged action name e.g. `'stripe.invoices.create'` |
-| `operationType` | `'CREATE' \| 'UPDATE' \| 'DELETE'` | No | Defaults to `'CREATE'` |
-| `args` | `any[]` | No | Arguments passed to `fn` |
-| `rollback` | `(result: T) => Promise<void>` | No | Custom rollback — if omitted, server LIFO rollback triggers |
-| `requiresApproval` | `boolean` | No | Block until human approves from dashboard |
-| `pollIntervalMs` | `number` | No | Approval polling interval (default: 2000ms) |
+| `connector` | `string` | Yes | Connector prefix e.g. `'stripe'`, `'github'` |
+| `requiresApproval` | `string[]` | No | Method paths requiring human approval |
+| `pollIntervalMs` | `number` | No | Approval poll interval (default: 2000ms) |
 | `timeoutMs` | `number` | No | Approval timeout (default: 24h) |
-
 ---
 
 ### `agentrein.resumeSession(sessionId)` / `agentrein.getSession(sessionId)`
@@ -173,7 +138,7 @@ Flag any action with `requiresApproval: true` to require human sign-off before e
 
 **Flow:**
 
-1. `call()` logs the action as `PENDING_APPROVAL`
+1. `wrap()` intercepts the call and logs the action as `PENDING_APPROVAL`
 2. SDK polls `GET /approvals/:id` at the configured interval
 3. A reviewer approves or rejects from the AgentRein dashboard
 4. **Approved** → `fn()` executes → action updated to `SUCCESS`
@@ -185,7 +150,7 @@ Flag any action with `requiresApproval: true` to require human sign-off before e
 import { AgentRein, ApprovalRejectedError } from 'agentrein'
 
 try {
-  await agentrein.call(fn, session, args, { requiresApproval: true })
+  await agentStripe.subscriptions.cancel({ id: 'sub_123' })
 } catch (err) {
   if (err instanceof ApprovalRejectedError) {
     console.log('Rejected:', err.reason)
@@ -205,8 +170,8 @@ try {
 
 | Mode | Behavior | When to Use |
 |---|---|---|
-| `'open'` (default) | If server is down, `call()` executes unprotected | Most use cases |
-| `'closed'` | If server is down, `call()` throws `AgentReinUnavailableError` | Finance, healthcare |
+| `'open'` (default) | If server is down, intercepted calls execute unprotected | Most use cases |
+| `'closed'` | If server is down, intercepted calls may throw `AgentReinUnavailableError` (during session/token init) | Finance, healthcare |
 
 ## Supported Connectors
 
