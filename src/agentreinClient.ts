@@ -259,10 +259,21 @@ export class AgentRein {
                     ).catch(() => {});
                 } else {
                     axios.post(
-                        `${this.serverUrl}/sessions/${session.id}/rollback`,
-                        {},
-                        { headers },
-                    ).catch(() => { });
+                        `${this.serverUrl}/sessions/${session.id}/actions`,
+                        {
+                            apiName: options.actionName,
+                            operationType: options.operationType ?? 'CREATE',
+                            payload: options.args?.[0] ?? {},
+                            response: error instanceof Error ? error.message : String(error),
+                            status: 'FAILED',
+                        },
+                        { headers }
+                    ).catch(() => {
+                        // Fallback: log failed, fire rollback directly
+                        this.authHeaders().then(h =>
+                            axios.post(`${this.serverUrl}/sessions/${session.id}/rollback`, {}, { headers: h })
+                        ).catch(() => {});
+                    });
                 }
 
                 throw error;
@@ -309,14 +320,24 @@ export class AgentRein {
                     )
                 ).catch(() => {});
             } else {
-                // Trigger server LIFO rollback
-                this.authHeaders().then((headers) => 
+                this.authHeaders().then((headers) =>
                     axios.post(
-                        `${this.serverUrl}/sessions/${session.id}/rollback`,
-                        {},
-                        { headers },
+                        `${this.serverUrl}/sessions/${session.id}/actions`,
+                        {
+                            apiName: options.actionName,
+                            operationType: options.operationType ?? 'CREATE',
+                            payload: options.args?.[0] ?? {},
+                            response: error instanceof Error ? error.message : String(error),
+                            status: 'FAILED',
+                        },
+                        { headers }
                     )
-                ).catch(() => { });
+                ).catch(() => {
+                    // Fallback: log failed, fire rollback directly
+                    this.authHeaders().then(h =>
+                        axios.post(`${this.serverUrl}/sessions/${session.id}/rollback`, {}, { headers: h })
+                    ).catch(() => {});
+                });
             }
 
             throw error;
@@ -366,9 +387,26 @@ export class AgentRein {
                             ).catch(() => {});
                             return result;
                         }).catch((err: any) => {
+                            // Log the failed action — this triggers the server-side auto-rollback
+                            // (server.ts setImmediate rollbackAll on FAILED status, from Prompt 13)
                             self.authHeaders().then(headers =>
-                                axios.post(`${self.serverUrl}/sessions/${session.id}/rollback`, {}, { headers })
-                            ).catch(() => {});
+                                axios.post(
+                                    `${self.serverUrl}/sessions/${session.id}/actions`,
+                                    {
+                                        apiName,
+                                        operationType,
+                                        payload: args[0] ?? {},
+                                        response: err instanceof Error ? err.message : String(err),
+                                        status: 'FAILED',
+                                    },
+                                    { headers }
+                                )
+                            ).catch(() => {
+                                // Fallback: if logging fails, fire rollback directly
+                                self.authHeaders().then(h =>
+                                    axios.post(`${self.serverUrl}/sessions/${session.id}/rollback`, {}, { headers: h })
+                                ).catch(() => {});
+                            });
                             throw err;
                         });
                     }
