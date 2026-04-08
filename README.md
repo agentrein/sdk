@@ -13,30 +13,21 @@ npm install agentrein
 
 ## Quick Start
 
-```typescript
-// ESM
+```ts
 import { AgentRein } from 'agentrein'
 
-// CJS
-const { AgentRein } = require('agentrein')
+const agentrein = new AgentRein({ apiKey: process.env.AGENTREIN_API_KEY })
 
-// Initialize the client
-const agentrein = new AgentRein({
-  apiKey: process.env.AGENTREIN_API_KEY!,
-})
-
-// Create a session describing what your agent intends to do
 const session = await agentrein.newSession({
-  agentId: 'billing-agent',
-  intent: 'Send Q4 invoices to all customers',
+    agentId: 'billing-agent',
+    intent: 'Send Q4 invoices to all customers',
 })
 
-// Wrap any API call — AgentRein logs it and auto-rolls back on failure
 const agentStripe = agentrein.wrap(stripe, session, { connector: 'stripe' })
 
 await agentStripe.invoices.create({ customer: 'cus_123', amount: 5000 })
 // If anything fails → automatic LIFO rollback
-// Use requiresApproval for high-risk methods
+// High-risk methods: use requiresApproval
 ```
 
 ## Core Concepts
@@ -146,16 +137,18 @@ Flag any action with `requiresApproval: true` to require human sign-off before e
 
 **Error handling:**
 
-```typescript
-import { AgentRein, ApprovalRejectedError } from 'agentrein'
+```ts
+const agentStripe = agentrein.wrap(stripe, session, {
+    connector: 'stripe',
+    requiresApproval: ['subscriptions.cancel'],
+})
 
 try {
-  await agentStripe.subscriptions.cancel({ id: 'sub_123' })
+    await agentStripe.subscriptions.cancel({ id: 'sub_123' })
 } catch (err) {
-  if (err instanceof ApprovalRejectedError) {
-    console.log('Rejected:', err.reason)
-    // rollback already triggered automatically
-  }
+    if (err instanceof ApprovalRejectedError) {
+        console.log('Rejected:', err.reason)
+    }
 }
 ```
 
@@ -163,8 +156,8 @@ try {
 
 | Error | When Thrown |
 |---|---|
-| `AgentReinUnavailableError` | Server unreachable during `newSession()` or token fetch. In fail-closed mode, also thrown from `call()`. |
-| `ApprovalRejectedError` | Reviewer rejected the action. Has a `.reason` property. |
+| `AgentReinUnavailableError` | Server unreachable during `newSession()` or token fetch |
+| `ApprovalRejectedError` | Reviewer rejected the action via dashboard. Has `.reason` property |
 
 ## Fail Modes
 

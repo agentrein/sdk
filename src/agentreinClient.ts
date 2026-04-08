@@ -14,19 +14,6 @@ export interface SessionOptions {
     intent?: string;
 }
 
-export interface UndoConfig {
-    __isUndoConfig: true;
-    type?: 'slack-correction' | 'http-delete' | 'none' | string;
-    url?: string;
-    headers?: Record<string, string>;
-    body?: Record<string, unknown>;
-    action?: string;
-    rollback?: (response: any) => Promise<void>;
-}
-
-export function createUndoConfig(config: Omit<UndoConfig, '__isUndoConfig'>): UndoConfig {
-    return { __isUndoConfig: true, ...config };
-}
 
 export interface WrapOptions {
     connector: string;
