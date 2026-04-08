@@ -146,7 +146,7 @@ export class AgentRein {
 
     // ── logAction (private) ──────────────────────────────
 
-    private logAction(
+    private async logAction(
         sessionId: string,
         apiName: string,
         operationType: 'CREATE' | 'UPDATE' | 'DELETE',
@@ -154,10 +154,10 @@ export class AgentRein {
         response: unknown,
         status: 'SUCCESS' | 'FAILED' | 'PENDING_APPROVAL',
         extra?: { timeoutMs?: number },
-    ): void {
-        // Always fire-and-forget, but with a guaranteed fallback
-        this.authHeaders().then(headers =>
-            axios.post(
+    ): Promise<void> {
+        try {
+            const headers = await this.authHeaders();
+            await axios.post(
                 `${this.serverUrl}/sessions/${sessionId}/actions`,
                 {
                     apiName,
@@ -168,19 +168,22 @@ export class AgentRein {
                     ...(extra?.timeoutMs != null && { timeoutMs: extra.timeoutMs }),
                 },
                 { headers },
-            )
-        ).catch(() => {
-            // Fallback only for FAILED: fire rollback directly if logging fails
+            );
+        } catch {
+            // Fallback: if logging fails and action was FAILED, fire rollback directly
             if (status === 'FAILED') {
-                this.authHeaders().then(h =>
-                    axios.post(
+                try {
+                    const h = await this.authHeaders();
+                    await axios.post(
                         `${this.serverUrl}/sessions/${sessionId}/rollback`,
                         {},
                         { headers: h },
-                    )
-                ).catch(() => {});
+                    );
+                } catch {
+                    // swallow silently
+                }
             }
-        });
+        }
     }
 
     // ── pollApproval (private) ────────────────────────────
@@ -279,13 +282,13 @@ export class AgentRein {
                                 decision = await self.pollApproval(approvalId, pollIntervalMs, timeoutMs);
                             } catch (timeoutErr) {
                                 // Timeout — log FAILED (triggers server auto-rollback)
-                                self.logAction(session.id, apiName, operationType, args[0], null, 'FAILED');
+                                await self.logAction(session.id, apiName, operationType, args[0], null, 'FAILED');
                                 throw timeoutErr;
                             }
 
                             // 3. Rejected — log FAILED (triggers server auto-rollback)
                             if (decision !== 'APPROVED') {
-                                self.logAction(session.id, apiName, operationType, args[0], null, 'FAILED');
+                                await self.logAction(session.id, apiName, operationType, args[0], null, 'FAILED');
                                 throw new ApprovalRejectedError(
                                     (decision as { status: 'REJECTED'; reason: string }).reason
                                 );
@@ -296,7 +299,7 @@ export class AgentRein {
                             try {
                                 result = await innerTarget.apply(thisArg, args);
                             } catch (execErr) {
-                                self.logAction(session.id, apiName, operationType, args[0], 
+                                await self.logAction(session.id, apiName, operationType, args[0], 
                                     execErr instanceof Error ? execErr.message : String(execErr), 
                                     'FAILED');
                                 throw execErr;
@@ -323,10 +326,10 @@ export class AgentRein {
                             // Log SUCCESS — fire-and-forget
                             self.logAction(session.id, apiName, operationType, args[0], result, 'SUCCESS');
                             return result;
-                        }).catch((err: any) => {
+                        }).catch(async (err: any) => {
                             // Log FAILED — this is what triggers server-side auto-rollback
                             // logAction() has a built-in fallback to POST /rollback if logging fails
-                            self.logAction(
+                            await self.logAction(
                                 session.id, apiName, operationType, args[0],
                                 err instanceof Error ? err.message : String(err),
                                 'FAILED'
