@@ -28,8 +28,8 @@ export interface Session {
     agentId: string;
     intent: string | null;
     status: string;
-    startedAt: string;
-    endedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
 }
 
 // Re-export errors for consumer convenience

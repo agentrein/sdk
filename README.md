@@ -80,7 +80,7 @@ const session = await agentrein.newSession('billing-agent')
 const session = await agentrein.newSession()
 ```
 
-**Returns:** `Session` object with `id`, `organizationId`, `agentId`, `intent`, `status`, `startedAt`, `endedAt`.
+**Returns:** `Session` object with `id`, `organizationId`, `agentId`, `intent`, `status`, `createdAt`, `updatedAt`.
 
 ### `agentrein.wrap(client, session, options)`
 
