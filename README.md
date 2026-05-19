@@ -185,5 +185,5 @@ Built-in undo strategies for popular services:
 ## Links
 
 - [Documentation](https://agentrein.com/docs)
-- [Dashboard](https://app.agentrein.com)
+- [Dashboard](https://agentrein.com/dashboard)
 - [GitHub](https://github.com/agentrein/sdk)
