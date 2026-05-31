@@ -1,5 +1,7 @@
 import axios from 'axios';
-import { AgentReinUnavailableError, ApprovalRejectedError } from './errors';
+import { z } from 'zod';
+import { AgentReinUnavailableError, ApprovalRejectedError, ApprovalTimeoutError, ConfigValidationError, WrapOptionsValidationError } from './errors';
+import { retryWithBackoff } from './retry';
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -33,7 +35,15 @@ export interface Session {
 }
 
 // Re-export errors for consumer convenience
-export { AgentReinUnavailableError, ApprovalRejectedError };
+export { AgentReinUnavailableError, ApprovalRejectedError, ApprovalTimeoutError, ConfigValidationError, WrapOptionsValidationError };
+
+const WrapOptionsSchema = z.object({
+    connector: z.string().min(1),
+    pollIntervalMs: z.number().int().min(1000, 'pollIntervalMs must be >= 1000ms').optional(),
+    timeoutMs: z.number().int().min(5000, 'timeoutMs must be >= 5000ms').optional(),
+    failureMode: z.enum(['open', 'closed']).optional(),
+    requiresApproval: z.array(z.string()).optional(),
+});
 
 // ─── AgentRein Client ─────────────────────────────────────
 
@@ -111,25 +121,64 @@ export class AgentRein {
         return this.resumeSession(sessionId);
     }
 
-    async completeSession(session: Session | string): Promise<Session> {
-        const sessionId = typeof session === 'string' ? session : session.id;
+    async completeSession(session: Session): Promise<void> {
         const headers = await this.authHeaders();
         try {
-            const res = await axios.patch(
-                `${this.serverUrl}/sessions/${sessionId}`,
+            await axios.patch(
+                `${this.serverUrl}/sessions/${session.id}`,
                 { status: 'COMPLETED' },
                 { headers }
             );
-            return res.data.data;
         } catch (err) {
             if (this.failureMode === 'closed') {
                 throw new AgentReinUnavailableError(
                     `Failed to complete session: ${err instanceof Error ? err.message : String(err)}`
                 );
             }
-            return typeof session === 'string' ? { id: session } as Session : session;
         }
     }
+
+    async rollbackSession(session: Session): Promise<void> {
+        const headers = await this.authHeaders();
+        try {
+            await axios.post(
+                `${this.serverUrl}/sessions/${session.id}/rollback`,
+                {},
+                { headers }
+            );
+        } catch (err) {
+            if (this.failureMode === 'closed') {
+                throw new AgentReinUnavailableError(
+                    `Failed to rollback session: ${err instanceof Error ? err.message : String(err)}`
+                );
+            }
+        }
+    }
+
+    async validateConfig(connectors: string[]): Promise<{
+        valid: boolean;
+        configured: string[];
+        missing: string[];
+        suggestions: string[];
+    }> {
+        const headers = await this.authHeaders();
+        try {
+            const res = await axios.get(
+                `${this.serverUrl}/settings/credentials/validate`,
+                {
+                    params: { connectors: connectors.join(',') },
+                    headers,
+                }
+            );
+            return res.data.data;
+        } catch (err) {
+            throw new ConfigValidationError(
+                `Configuration validation failed: ${err instanceof Error ? err.message : String(err)}`
+            );
+        }
+    }
+
+
 
     // ── logAction (private) ──────────────────────────────
 
@@ -144,19 +193,21 @@ export class AgentRein {
     ): Promise<void> {
         try {
             const headers = await this.authHeaders();
-            await axios.post(
-                `${this.serverUrl}/sessions/${sessionId}/actions`,
-                {
-                    apiName,
-                    operationType,
-                    payload: payload ?? {},
-                    response: response ?? {},
-                    status,
-                    ...(extra?.timeoutMs != null && { timeoutMs: extra.timeoutMs }),
-                },
-                { headers },
-            );
-        } catch {
+            await retryWithBackoff(async () => {
+                await axios.post(
+                    `${this.serverUrl}/sessions/${sessionId}/actions`,
+                    {
+                        apiName,
+                        operationType,
+                        payload: payload ?? {},
+                        response: response ?? {},
+                        status,
+                        ...(extra?.timeoutMs != null && { timeoutMs: extra.timeoutMs }),
+                    },
+                    { headers },
+                );
+            });
+        } catch (err) {
             // Fallback: if logging fails and action was FAILED, fire rollback directly
             if (status === 'FAILED') {
                 try {
@@ -170,6 +221,12 @@ export class AgentRein {
                     // swallow silently
                 }
             }
+
+            if (this.failureMode === 'closed') {
+                throw err;
+            } else {
+                console.warn(`Failed to log action: ${err instanceof Error ? err.message : String(err)}`);
+            }
         }
     }
 
@@ -179,32 +236,41 @@ export class AgentRein {
         approvalId: string,
         pollIntervalMs: number,
         timeoutMs: number,
-    ): Promise<'APPROVED' | { status: 'REJECTED'; reason: string }> {
+    ): Promise<'APPROVED'> {
         const headers = await this.authHeaders();
         const deadline = Date.now() + timeoutMs;
 
         while (Date.now() < deadline) {
+            let approval: any;
             try {
                 const res = await axios.get(
                     `${this.serverUrl}/approvals/${approvalId}`,
                     { headers },
                 );
-                const approval = res.data.data ?? res.data;
-                if (approval.status === 'APPROVED') return 'APPROVED';
-                if (approval.status === 'REJECTED') {
-                    return { status: 'REJECTED', reason: approval.reason ?? 'Rejected by reviewer' };
-                }
+                approval = res.data.data ?? res.data;
             } catch {
                 // backend unreachable — continue polling
             }
+
+            if (approval) {
+                if (approval.status === 'APPROVED') return 'APPROVED';
+                if (approval.status === 'REJECTED') {
+                    throw new ApprovalRejectedError(approvalId, approval.reason);
+                }
+            }
             await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
         }
-        throw new Error('Approval timeout exceeded');
+        throw new ApprovalTimeoutError(approvalId, timeoutMs);
     }
 
     // ── wrap ─────────────────────────────────────────────────
 
     wrap<T extends object>(client: T, session: Session, options: WrapOptions): T {
+        const parsed = WrapOptionsSchema.safeParse(options);
+        if (!parsed.success) {
+            throw new WrapOptionsValidationError(parsed.error.issues.map(e => e.message).join(', '));
+        }
+
         const self = this;
         const pollIntervalMs = options.pollIntervalMs ?? 2000;
         const timeoutMs = options.timeoutMs ?? 86_400_000;
@@ -244,18 +310,45 @@ export class AgentRein {
                             const headers = await self.authHeaders();
 
                             // 1. Log as PENDING_APPROVAL — await this, not fire-and-forget
-                            const actionRes = await axios.post(
-                                `${self.serverUrl}/sessions/${session.id}/actions`,
-                                {
-                                    apiName,
-                                    operationType,
-                                    payload: args[0] ?? {},
-                                    response: {},
-                                    status: 'PENDING_APPROVAL',
-                                    timeoutMs,
-                                },
-                                { headers },
-                            );
+                            let actionRes: any;
+                            try {
+                                actionRes = await retryWithBackoff(async () => {
+                                    return await axios.post(
+                                        `${self.serverUrl}/sessions/${session.id}/actions`,
+                                        {
+                                            apiName,
+                                            operationType,
+                                            payload: args[0] ?? {},
+                                            response: {},
+                                            status: 'PENDING_APPROVAL',
+                                            timeoutMs,
+                                        },
+                                        { headers },
+                                    );
+                                });
+                            } catch (err) {
+                                if (self.failureMode === 'closed') {
+                                    throw err;
+                                } else {
+                                    console.warn(`Failed to log action: ${err instanceof Error ? err.message : String(err)}`);
+                                }
+                            }
+
+                            if (!actionRes) {
+                                // Execute action directly without approval gate since failureMode is open
+                                let result: any;
+                                try {
+                                    result = await innerTarget.apply(thisArg, args);
+                                } catch (execErr) {
+                                    await self.logAction(session.id, apiName, operationType, args[0], 
+                                        execErr instanceof Error ? execErr.message : String(execErr), 
+                                        'FAILED');
+                                    throw execErr;
+                                }
+                                self.logAction(session.id, apiName, operationType, args[0], result, 'SUCCESS');
+                                return result;
+                            }
+
                             const action = actionRes.data.data ?? actionRes.data;
                             const actionId: string = action.id;
                             const approvalId: string = 
@@ -264,21 +357,12 @@ export class AgentRein {
                                 action.id;
 
                             // 2. Poll for decision
-                            let decision: 'APPROVED' | { status: 'REJECTED'; reason: string };
                             try {
-                                decision = await self.pollApproval(approvalId, pollIntervalMs, timeoutMs);
-                            } catch (timeoutErr) {
-                                // Timeout — log FAILED (triggers server auto-rollback)
+                                await self.pollApproval(approvalId, pollIntervalMs, timeoutMs);
+                            } catch (err) {
+                                // Timeout or Rejected — log FAILED (triggers server auto-rollback)
                                 await self.logAction(session.id, apiName, operationType, args[0], null, 'FAILED');
-                                throw timeoutErr;
-                            }
-
-                            // 3. Rejected — log FAILED (triggers server auto-rollback)
-                            if (decision !== 'APPROVED') {
-                                await self.logAction(session.id, apiName, operationType, args[0], null, 'FAILED');
-                                throw new ApprovalRejectedError(
-                                    (decision as { status: 'REJECTED'; reason: string }).reason
-                                );
+                                throw err;
                             }
 
                             // 4. Approved — execute the function
@@ -294,12 +378,20 @@ export class AgentRein {
 
                             // 5. PATCH existing action to SUCCESS (fire-and-forget)
                             self.authHeaders().then(h =>
-                                axios.patch(
-                                    `${self.serverUrl}/sessions/${session.id}/actions/${actionId}`,
-                                    { status: 'SUCCESS', response: result },
-                                    { headers: h },
-                                )
-                            ).catch(() => {});
+                                retryWithBackoff(async () => {
+                                    await axios.patch(
+                                        `${self.serverUrl}/sessions/${session.id}/actions/${actionId}`,
+                                        { status: 'SUCCESS', response: result },
+                                        { headers: h },
+                                    );
+                                })
+                            ).catch((err) => {
+                                if (self.failureMode === 'closed') {
+                                    throw err;
+                                } else {
+                                    console.warn(`Failed to update action to SUCCESS: ${err instanceof Error ? err.message : String(err)}`);
+                                }
+                            });
 
                             return result;
                         })();

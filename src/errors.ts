@@ -10,17 +10,43 @@ export class AgentReinUnavailableError extends Error {
 }
 
 export class ApprovalRejectedError extends Error {
-    constructor(public reason: string) {
-        super(`Action rejected by reviewer: ${reason}`);
-        this.name = 'ApprovalRejectedError';
-    }
+  public readonly approvalId: string;
+  public readonly reason: string | undefined;
+  constructor(approvalId: string, reason?: string) {
+    super(`Approval ${approvalId} was rejected${reason ? ': ' + reason : ''}`);
+    this.name = 'ApprovalRejectedError';
+    this.approvalId = approvalId;
+    this.reason = reason;
+    Object.setPrototypeOf(this, ApprovalRejectedError.prototype);
+  }
 }
 
 export class ApprovalTimeoutError extends Error {
-    constructor(apiName: string, timeoutMinutes: number) {
-        super(
-            `Action "${apiName}" was not approved within ${timeoutMinutes} minutes — auto-rejected`,
-        );
-        this.name = 'ApprovalTimeoutError';
+  public readonly approvalId: string;
+  public readonly timeoutMs: number;
+  constructor(approvalId: string, timeoutMs: number) {
+    super(`Approval ${approvalId} timed out after ${timeoutMs}ms`);
+    this.name = 'ApprovalTimeoutError';
+    this.approvalId = approvalId;
+    this.timeoutMs = timeoutMs;
+    Object.setPrototypeOf(this, ApprovalTimeoutError.prototype);
+  }
+}
+
+export class ConfigValidationError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'ConfigValidationError';
+        Object.setPrototypeOf(this, ConfigValidationError.prototype);
     }
 }
+
+export class WrapOptionsValidationError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'WrapOptionsValidationError';
+        Object.setPrototypeOf(this, WrapOptionsValidationError.prototype);
+    }
+}
+
+

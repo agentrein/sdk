@@ -6,7 +6,8 @@
     "declaration": false,
     "outDir": "./dist/esm",
     "rootDir": "./src",
-    "strict": true
+    "strict": true,
+    "skipLibCheck": true
   },
   "include": ["src/**/*"]
 }
