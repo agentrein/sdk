@@ -2,6 +2,7 @@ import axios from 'axios';
 import { z } from 'zod';
 import { AgentReinUnavailableError, ApprovalRejectedError, ApprovalTimeoutError, ConfigValidationError, WrapOptionsValidationError } from './errors';
 import { retryWithBackoff } from './retry';
+import { createSimulatedResponse } from './simulate-response';
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -350,6 +351,9 @@ export class AgentRein {
                             }
 
                             const action = actionRes.data.data ?? actionRes.data;
+                            if (action && action.simulated === true) {
+                                return createSimulatedResponse();
+                            }
                             const actionId: string = action.id;
                             const approvalId: string = 
                                 action.approvalRequest?.id ?? 
@@ -398,6 +402,44 @@ export class AgentRein {
                     }
 
                     // ── Standard execution path ─────────────────────────────
+                    const isSessionSandbox = (session as any).isSandbox === true;
+
+                    if (isSessionSandbox) {
+                        return (async () => {
+                            let actionRes: any;
+                            try {
+                                const headers = await self.authHeaders();
+                                actionRes = await retryWithBackoff(async () => {
+                                    return await axios.post(
+                                        `${self.serverUrl}/sessions/${session.id}/actions`,
+                                        {
+                                            apiName,
+                                            operationType,
+                                            payload: args[0] ?? {},
+                                            response: {},
+                                            status: 'SUCCESS',
+                                        },
+                                        { headers },
+                                    );
+                                });
+                            } catch (err) {
+                                if (self.failureMode === 'closed') {
+                                    throw err;
+                                } else {
+                                    console.warn(`Failed to log action: ${err instanceof Error ? err.message : String(err)}`);
+                                }
+                            }
+
+                            const action = actionRes?.data?.data ?? actionRes?.data;
+                            if (action && action.simulated === true) {
+                                return createSimulatedResponse();
+                            }
+
+                            const result = await innerTarget.apply(thisArg, args);
+                            return result;
+                        })();
+                    }
+
                     const execution = innerTarget.apply(thisArg, args);
 
                     if (execution && typeof execution.then === 'function') {
