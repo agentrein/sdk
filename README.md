@@ -1,9 +1,14 @@
-# agentrein
+<div align="center">
+      
+# AgentRein SDK
 
 The safety net for AI agents. Automatic rollback, approval gates, and intent verification.
 
-[![npm version](https://badge.fury.io/js/agentrein.svg)](https://www.npmjs.com/package/agentrein)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge)](LICENSE)
+[![npm](https://img.shields.io/npm/v/agentrein?style=for-the-badge&logo=npm&color=CB3837&logoColor=white)](https://www.npmjs.com/package/agentrein)
+
+</div>
+
 
 ## Installation
 
