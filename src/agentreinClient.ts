@@ -31,6 +31,7 @@ export interface Session {
     agentId: string;
     intent: string | null;
     status: string;
+    isSandbox: boolean;
     createdAt: string;
     updatedAt: string;
 }
@@ -402,7 +403,7 @@ export class AgentRein {
                     }
 
                     // ── Standard execution path ─────────────────────────────
-                    const isSessionSandbox = (session as any).isSandbox === true;
+                    const isSessionSandbox = session.isSandbox === true;
 
                     if (isSessionSandbox) {
                         return (async () => {
