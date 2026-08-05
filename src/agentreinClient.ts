@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { AgentReinUnavailableError, ApprovalRejectedError, ApprovalTimeoutError, ConfigValidationError, WrapOptionsValidationError } from './errors';
 import { retryWithBackoff } from './retry';
 import { createSimulatedResponse } from './simulate-response';
+import { retryConnectorCall, isTransientConnectorError } from './connectorRetry';
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -21,6 +22,7 @@ export interface SessionOptions {
 export interface WrapOptions {
     connector: string;
     requiresApproval?: string[];
+    retryable?: string[];
     pollIntervalMs?: number;
     timeoutMs?: number;
 }
@@ -45,6 +47,7 @@ const WrapOptionsSchema = z.object({
     timeoutMs: z.number().int().min(5000, 'timeoutMs must be >= 5000ms').optional(),
     failureMode: z.enum(['open', 'closed']).optional(),
     requiresApproval: z.array(z.string()).optional(),
+    retryable: z.array(z.string()).optional(),
 });
 
 // ─── AgentRein Client ─────────────────────────────────────
@@ -307,6 +310,10 @@ export class AgentRein {
                         p => methodPath === p || apiName === p
                     ) ?? false;
 
+                    const isRetryable = options.retryable?.some(
+                        p => methodPath === p || apiName === p
+                    ) ?? false;
+
                     if (needsApproval) {
                         return (async () => {
                             const headers = await self.authHeaders();
@@ -438,6 +445,30 @@ export class AgentRein {
 
                             const result = await innerTarget.apply(thisArg, args);
                             return result;
+                        })();
+                    }
+
+                    if (isRetryable) {
+                        return (async () => {
+                            try {
+                                const { result, retryCount } = await retryConnectorCall(async (idempotencyKey) => {
+                                    return await innerTarget.apply(thisArg, args);
+                                });
+
+                                const responseWithMeta = (result !== null && typeof result === 'object')
+                                    ? { ...result, _agentreinMeta: { retryCount } }
+                                    : result;
+
+                                self.logAction(session.id, apiName, operationType, args[0], responseWithMeta, 'SUCCESS');
+                                return result;
+                            } catch (err) {
+                                await self.logAction(
+                                    session.id, apiName, operationType, args[0],
+                                    err instanceof Error ? err.message : String(err),
+                                    'FAILED',
+                                );
+                                throw err;
+                            }
                         })();
                     }
 
