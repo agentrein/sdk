@@ -42,7 +42,7 @@ await agentStripe.invoices.create({ customer: 'cus_123', amount: 5000 })
 | **Sessions** | One agent workflow. All actions are grouped under a single session so rollback can undo them as a unit. |
 | **Actions** | Every action intercepted by `wrap()` is logged with the full payload and response, creating a complete audit trail. |
 | **Rollback** | On any failure, AgentRein triggers a LIFO (last-in-first-out) undo of every action in the session. |
-| **Approval Gate** | Flag high-risk actions with `requiresApproval: true` to block execution until a human approves from the dashboard. |
+| **Approval Gate** | Flag high-risk method paths with `requiresApproval` to block execution until a human approves from the dashboard. |
 | **Fail-Open** | If the AgentRein server is unreachable, your agent continues normally by default — safety never blocks production. |
 
 ## API Reference
@@ -104,13 +104,14 @@ const agentStripe = agentrein.wrap(stripe, session, {
 |---|---|---|---|
 | `connector` | `string` | Yes | Connector prefix e.g. `'stripe'`, `'github'` |
 | `requiresApproval` | `string[]` | No | Method paths requiring human approval |
+| `retryable` | `string[]` | No | Method paths to retry after transient connector failures |
 | `pollIntervalMs` | `number` | No | Approval poll interval (default: 2000ms) |
 | `timeoutMs` | `number` | No | Approval timeout (default: 24h) |
 ---
 
 ### `agentrein.resumeSession(sessionId)` / `agentrein.getSession(sessionId)`
 
-Both are aliases — returns the full session with all actions.
+Both are aliases — return a `Session` object.
 
 ```typescript
 const session = await agentrein.resumeSession('sess_abc123')
@@ -120,7 +121,7 @@ const session = await agentrein.getSession('sess_abc123')
 
 ---
 
-### `agentrein.completeSession(session: Session): Promise<Session>`
+### `agentrein.completeSession(session: Session): Promise<void>`
 
 Marks the session as `COMPLETED`. This locks the session and prevents further actions from being added.
 
@@ -130,14 +131,14 @@ await agentrein.completeSession(session)
 
 ## Approval Gate
 
-Flag any action with `requiresApproval: true` to require human sign-off before execution.
+Flag method paths with `requiresApproval` to require human sign-off before execution.
 
 **Flow:**
 
 1. `wrap()` intercepts the call and logs the action as `PENDING_APPROVAL`
 2. SDK polls `GET /approvals/:id` at the configured interval
 3. A reviewer approves or rejects from the AgentRein dashboard
-4. **Approved** → `fn()` executes → action updated to `SUCCESS`
+4. **Approved** → wrapped method executes → action updated to `SUCCESS`
 5. **Rejected** → `ApprovalRejectedError` thrown → session rollback triggered
 
 **Error handling:**
