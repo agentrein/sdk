@@ -18,7 +18,6 @@ export interface SessionOptions {
     intent?: string;
 }
 
-
 export interface WrapOptions {
     connector: string;
     requiresApproval?: string[];
@@ -58,6 +57,8 @@ export class AgentRein {
     private readonly failureMode: 'open' | 'closed';
     private token: string | null = null;
     private tokenExpiresAt: number = 0;
+    private captureBeforeStateCache: Map<string, boolean> | null = null;
+    private registryCachePromise: Promise<Map<string, boolean> | null> | null = null;
 
     constructor(options: AgentReinOptions) {
         this.serverUrl = options.serverUrl || 'https://api.agentrein.com';
@@ -89,6 +90,81 @@ export class AgentRein {
     private async authHeaders(): Promise<Record<string, string>> {
         const token = await this.getToken();
         return { Authorization: `Bearer ${token}` };
+    }
+
+    // ── Registry & Precapture Helpers ───────────────────
+
+    private async getCaptureBeforeStateCache(): Promise<Map<string, boolean> | null> {
+        if (this.captureBeforeStateCache !== null) {
+            return this.captureBeforeStateCache;
+        }
+        if (this.registryCachePromise !== null) {
+            return this.registryCachePromise;
+        }
+
+        this.registryCachePromise = (async () => {
+            try {
+                const headers = await this.authHeaders();
+                const res = await axios.get(`${this.serverUrl}/registry`, { headers });
+                const actions: Array<{ apiName?: string; captureBeforeState?: boolean }> =
+                    res.data?.data ?? res.data;
+                const map = new Map<string, boolean>();
+                if (Array.isArray(actions)) {
+                    for (const action of actions) {
+                        if (action.apiName && typeof action.captureBeforeState === 'boolean') {
+                            map.set(action.apiName, action.captureBeforeState);
+                        }
+                    }
+                }
+                this.captureBeforeStateCache = map;
+                return map;
+            } catch (err) {
+                console.warn(
+                    `[AgentRein] Failed to fetch /registry: ${err instanceof Error ? err.message : String(err)}. Defaulting to precapture for all actions.`,
+                );
+                return null;
+            }
+        })();
+
+        return this.registryCachePromise;
+    }
+
+    private async needsPrecapture(apiName: string): Promise<boolean> {
+        const cache = await this.getCaptureBeforeStateCache();
+        if (cache === null) {
+            return true;
+        }
+        return cache.get(apiName) === true;
+    }
+
+    private async executePrecapture(
+        sessionId: string,
+        apiName: string,
+        payload: unknown,
+    ): Promise<{ precaptureId: string | null; captureFailed: boolean }> {
+        const shouldCapture = await this.needsPrecapture(apiName);
+        if (!shouldCapture) {
+            return { precaptureId: null, captureFailed: false };
+        }
+
+        try {
+            const headers = await this.authHeaders();
+            const res = await axios.post(
+                `${this.serverUrl}/sessions/${sessionId}/actions/precapture`,
+                { apiName, payload: payload ?? {} },
+                { headers },
+            );
+            const data = res.data?.data ?? res.data;
+            return {
+                precaptureId: typeof data?.precaptureId === 'string' ? data.precaptureId : null,
+                captureFailed: data?.captureFailed === true,
+            };
+        } catch (err) {
+            console.warn(
+                `[AgentRein] Precapture request failed for ${apiName}: ${err instanceof Error ? err.message : String(err)}. Proceeding with captureFailed=true.`,
+            );
+            return { precaptureId: null, captureFailed: true };
+        }
     }
 
     // ── newSession ───────────────────────────────────────
@@ -183,8 +259,6 @@ export class AgentRein {
         }
     }
 
-
-
     // ── logAction (private) ──────────────────────────────
 
     private async logAction(
@@ -194,7 +268,11 @@ export class AgentRein {
         payload: unknown,
         response: unknown,
         status: 'SUCCESS' | 'FAILED' | 'PENDING_APPROVAL',
-        extra?: { timeoutMs?: number },
+        extra?: {
+            timeoutMs?: number;
+            precaptureId?: string | null;
+            captureFailed?: boolean;
+        },
     ): Promise<void> {
         try {
             const headers = await this.authHeaders();
@@ -208,6 +286,8 @@ export class AgentRein {
                         response: response ?? {},
                         status,
                         ...(extra?.timeoutMs != null && { timeoutMs: extra.timeoutMs }),
+                        ...(extra?.precaptureId != null && { precaptureId: extra.precaptureId }),
+                        ...(extra?.captureFailed != null && { captureFailed: extra.captureFailed }),
                     },
                     { headers },
                 );
@@ -273,10 +353,13 @@ export class AgentRein {
     wrap<T extends object>(client: T, session: Session, options: WrapOptions): T {
         const parsed = WrapOptionsSchema.safeParse(options);
         if (!parsed.success) {
-            throw new WrapOptionsValidationError(parsed.error.issues.map(e => e.message).join(', '));
+            throw new WrapOptionsValidationError(parsed.error.issues.map((e: { message: string }) => e.message).join(', '));
         }
 
         const self = this;
+        // Eagerly initiate registry fetch in background
+        void self.getCaptureBeforeStateCache();
+
         const pollIntervalMs = options.pollIntervalMs ?? 2000;
         const timeoutMs = options.timeoutMs ?? 86_400_000;
 
@@ -316,6 +399,7 @@ export class AgentRein {
 
                     if (needsApproval) {
                         return (async () => {
+                            const precapture = await self.executePrecapture(session.id, apiName, args[0]);
                             const headers = await self.authHeaders();
 
                             // 1. Log as PENDING_APPROVAL — await this, not fire-and-forget
@@ -331,6 +415,8 @@ export class AgentRein {
                                             response: {},
                                             status: 'PENDING_APPROVAL',
                                             timeoutMs,
+                                            ...(precapture.precaptureId && { precaptureId: precapture.precaptureId }),
+                                            ...(precapture.captureFailed && { captureFailed: precapture.captureFailed }),
                                         },
                                         { headers },
                                     );
@@ -349,12 +435,18 @@ export class AgentRein {
                                 try {
                                     result = await innerTarget.apply(thisArg, args);
                                 } catch (execErr) {
-                                    await self.logAction(session.id, apiName, operationType, args[0], 
-                                        execErr instanceof Error ? execErr.message : String(execErr), 
-                                        'FAILED');
+                                    await self.logAction(
+                                        session.id, apiName, operationType, args[0],
+                                        execErr instanceof Error ? execErr.message : String(execErr),
+                                        'FAILED',
+                                        { precaptureId: precapture.precaptureId, captureFailed: precapture.captureFailed },
+                                    );
                                     throw execErr;
                                 }
-                                self.logAction(session.id, apiName, operationType, args[0], result, 'SUCCESS');
+                                self.logAction(
+                                    session.id, apiName, operationType, args[0], result, 'SUCCESS',
+                                    { precaptureId: precapture.precaptureId, captureFailed: precapture.captureFailed },
+                                );
                                 return result;
                             }
 
@@ -363,9 +455,9 @@ export class AgentRein {
                                 return createSimulatedResponse();
                             }
                             const actionId: string = action.id;
-                            const approvalId: string = 
-                                action.approvalRequest?.id ?? 
-                                action.approval?.id ?? 
+                            const approvalId: string =
+                                action.approvalRequest?.id ??
+                                action.approval?.id ??
                                 action.id;
 
                             // 2. Poll for decision
@@ -373,7 +465,10 @@ export class AgentRein {
                                 await self.pollApproval(approvalId, pollIntervalMs, timeoutMs);
                             } catch (err) {
                                 // Timeout or Rejected — log FAILED (triggers server auto-rollback)
-                                await self.logAction(session.id, apiName, operationType, args[0], null, 'FAILED');
+                                await self.logAction(
+                                    session.id, apiName, operationType, args[0], null, 'FAILED',
+                                    { precaptureId: precapture.precaptureId, captureFailed: precapture.captureFailed },
+                                );
                                 throw err;
                             }
 
@@ -382,9 +477,12 @@ export class AgentRein {
                             try {
                                 result = await innerTarget.apply(thisArg, args);
                             } catch (execErr) {
-                                await self.logAction(session.id, apiName, operationType, args[0], 
-                                    execErr instanceof Error ? execErr.message : String(execErr), 
-                                    'FAILED');
+                                await self.logAction(
+                                    session.id, apiName, operationType, args[0],
+                                    execErr instanceof Error ? execErr.message : String(execErr),
+                                    'FAILED',
+                                    { precaptureId: precapture.precaptureId, captureFailed: precapture.captureFailed },
+                                );
                                 throw execErr;
                             }
 
@@ -409,11 +507,12 @@ export class AgentRein {
                         })();
                     }
 
-                    // ── Standard execution path ─────────────────────────────
+                    // ── Standard & Sandbox execution path ───────────────────
                     const isSessionSandbox = session.isSandbox === true;
 
                     if (isSessionSandbox) {
                         return (async () => {
+                            const precapture = await self.executePrecapture(session.id, apiName, args[0]);
                             let actionRes: any;
                             try {
                                 const headers = await self.authHeaders();
@@ -426,6 +525,8 @@ export class AgentRein {
                                             payload: args[0] ?? {},
                                             response: {},
                                             status: 'SUCCESS',
+                                            ...(precapture.precaptureId && { precaptureId: precapture.precaptureId }),
+                                            ...(precapture.captureFailed && { captureFailed: precapture.captureFailed }),
                                         },
                                         { headers },
                                     );
@@ -450,6 +551,7 @@ export class AgentRein {
 
                     if (isRetryable) {
                         return (async () => {
+                            const precapture = await self.executePrecapture(session.id, apiName, args[0]);
                             try {
                                 const { result, retryCount } = await retryConnectorCall(async (idempotencyKey) => {
                                     return await innerTarget.apply(thisArg, args);
@@ -459,41 +561,42 @@ export class AgentRein {
                                     ? { ...result, _agentreinMeta: { retryCount } }
                                     : result;
 
-                                self.logAction(session.id, apiName, operationType, args[0], responseWithMeta, 'SUCCESS');
+                                self.logAction(
+                                    session.id, apiName, operationType, args[0], responseWithMeta, 'SUCCESS',
+                                    { precaptureId: precapture.precaptureId, captureFailed: precapture.captureFailed },
+                                );
                                 return result;
                             } catch (err) {
                                 await self.logAction(
                                     session.id, apiName, operationType, args[0],
                                     err instanceof Error ? err.message : String(err),
                                     'FAILED',
+                                    { precaptureId: precapture.precaptureId, captureFailed: precapture.captureFailed },
                                 );
                                 throw err;
                             }
                         })();
                     }
 
-                    const execution = innerTarget.apply(thisArg, args);
-
-                    if (execution && typeof execution.then === 'function') {
-                        return execution.then((result: any) => {
-                            // Log SUCCESS — fire-and-forget
-                            self.logAction(session.id, apiName, operationType, args[0], result, 'SUCCESS');
+                    return (async () => {
+                        const precapture = await self.executePrecapture(session.id, apiName, args[0]);
+                        try {
+                            const result = await innerTarget.apply(thisArg, args);
+                            self.logAction(
+                                session.id, apiName, operationType, args[0], result, 'SUCCESS',
+                                { precaptureId: precapture.precaptureId, captureFailed: precapture.captureFailed },
+                            );
                             return result;
-                        }).catch(async (err: any) => {
-                            // Log FAILED — this is what triggers server-side auto-rollback
-                            // logAction() has a built-in fallback to POST /rollback if logging fails
+                        } catch (err) {
                             await self.logAction(
                                 session.id, apiName, operationType, args[0],
                                 err instanceof Error ? err.message : String(err),
-                                'FAILED'
+                                'FAILED',
+                                { precaptureId: precapture.precaptureId, captureFailed: precapture.captureFailed },
                             );
                             throw err;
-                        });
-                    }
-
-                    // Sync function
-                    self.logAction(session.id, apiName, operationType, args[0], execution, 'SUCCESS');
-                    return execution;
+                        }
+                    })();
                 },
             }) as V;
         }
